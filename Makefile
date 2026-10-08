@@ -3,8 +3,18 @@ PANEL_WORKDIR ?= $(CURDIR)/.tmp/home-management-center
 EMBED_STATIC_DIR := internal/managementasset/static
 LOCAL_BINARY ?= CLIProxyAPIHome
 DOCKER_IMAGE ?= cliproxyapi-home:embedded-local
+GOLANGCI_LINT ?= golangci-lint
 
-.PHONY: embed-local panel-assets-local docker-embed-local run-embedded-local clean-embedded-local
+.PHONY: fmt lint embed-local panel-assets-local docker-embed-local run-embedded-local clean-embedded-local
+
+# Format Go sources in module packages (skips dot dirs such as .tmp and testdata).
+fmt:
+	gofmt -w $$(go list -f '{{.Dir}}' ./...)
+
+lint:
+	@command -v "$(GOLANGCI_LINT)" >/dev/null || { echo "golangci-lint is required: https://golangci-lint.run/welcome/install/"; exit 1; }
+	@test -z "$$(gofmt -l $$(go list -f '{{.Dir}}' ./...))" || { echo "gofmt needed on:"; gofmt -l $$(go list -f '{{.Dir}}' ./...); exit 1; }
+	"$(GOLANGCI_LINT)" run ./...
 
 # Local-only helper. GitHub Actions builds embedded assets independently.
 embed-local: panel-assets-local
