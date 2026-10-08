@@ -34,9 +34,10 @@ import (
 )
 
 type Runtime struct {
-	stateApplyMu sync.Mutex
-	cfgMu        sync.RWMutex
-	cfg          *config.Config
+	quotaSelector *quotaResetSelector
+	stateApplyMu  sync.Mutex
+	cfgMu         sync.RWMutex
+	cfg           *config.Config
 
 	authDir    string
 	configPath string

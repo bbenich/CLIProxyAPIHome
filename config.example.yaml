@@ -141,11 +141,15 @@ credentials:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, quota-reset
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
-  # Enable universal session-sticky routing for all clients.
+  # quota-reset favors usable 100% five-hour windows with no timer, then the soonest weekly reset.
+  # Healthy stale weekly reset timestamps remain usable as estimates.
+  # It ignores static priority and session affinity.
+  # Existing credential/model scopes, availability, cooldowns and concurrency still apply.
+  # Enable universal session-sticky routing for all clients (except quota-reset).
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
   # execution or derived session identity, and the existing first-message hash fallback.
