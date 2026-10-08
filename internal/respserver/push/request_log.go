@@ -19,6 +19,9 @@ import (
 
 var requestLogID atomic.Uint64
 
+// maxRequestLogIDLength bounds request IDs embedded in request-log filenames.
+const maxRequestLogIDLength = 128
+
 // handleRequestLog handles a request log.
 func handleRequestLog(ctx context.Context, env dispatch.Env, args []string) dispatch.Reply {
 	_ = ctx
@@ -51,6 +54,9 @@ func handleRequestLog(ctx context.Context, env dispatch.Env, args []string) disp
 	}
 	if requestID == "" {
 		requestID = generateRequestLogID()
+	} else if !isSafeRequestLogID(requestID) {
+		log.Warn("request log: unsafe request id replaced with a generated id")
+		requestID = generateRequestLogID()
 	}
 
 	clientIP := strings.TrimSpace(env.ClientIP)
@@ -81,6 +87,25 @@ func generateRequestLogID() string {
 
 	id := requestLogID.Add(1)
 	return fmt.Sprintf("%d", id)
+}
+
+// isSafeRequestLogID reports whether requestID can be embedded in a request-log
+// filename. Only letters, digits, '.', '_' and '-' are allowed, and ".." is rejected.
+func isSafeRequestLogID(requestID string) bool {
+	if requestID == "" || len(requestID) > maxRequestLogIDLength || strings.Contains(requestID, "..") {
+		return false
+	}
+	for _, character := range requestID {
+		switch {
+		case character >= 'a' && character <= 'z',
+			character >= 'A' && character <= 'Z',
+			character >= '0' && character <= '9',
+			character == '.', character == '_', character == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // extractHeaderValue extracts a header value.
@@ -159,7 +184,7 @@ func sanitizeForFilename(url string) string {
 	sanitized := strings.ReplaceAll(path, "/", "-")
 	sanitized = strings.ReplaceAll(sanitized, ":", "-")
 
-	regUnsafe := regexp.MustCompile(`[<>:"|?*\s]`)
+	regUnsafe := regexp.MustCompile(`[<>:"|?*\s\\]`)
 	sanitized = regUnsafe.ReplaceAllString(sanitized, "-")
 
 	regHyphens := regexp.MustCompile(`-+`)
@@ -180,12 +205,20 @@ func writeRequestLogFile(filename string, content string) error {
 		return fmt.Errorf("empty filename")
 	}
 
+	if filepath.Base(filename) != filename || strings.ContainsAny(filename, `/\`) {
+		return fmt.Errorf("invalid request log filename")
+	}
+
 	logDir := "logs"
 	if errMk := os.MkdirAll(logDir, 0o755); errMk != nil {
 		return fmt.Errorf("ensure logs dir: %w", errMk)
 	}
 
 	filePath := filepath.Join(logDir, filename)
+	rel, errRel := filepath.Rel(logDir, filePath)
+	if errRel != nil || rel != filename {
+		return fmt.Errorf("request log path escapes log directory")
+	}
 	f, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if errOpen != nil {
 		return fmt.Errorf("open request log: %w", errOpen)

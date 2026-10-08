@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -213,8 +214,8 @@ func validateRequestLogParams(c *gin.Context, homeIP string, requestID string) b
 		respondError(c, http.StatusBadRequest, "missing_request_id", fmt.Errorf("request_id is required"))
 		return false
 	}
-	if strings.ContainsAny(requestID, `/\`) {
-		respondError(c, http.StatusBadRequest, "invalid_request_id", fmt.Errorf("request_id contains a path separator"))
+	if !isSafeRequestLogID(requestID) {
+		respondError(c, http.StatusBadRequest, "invalid_request_id", fmt.Errorf("request_id contains unsupported characters"))
 		return false
 	}
 	return true
@@ -409,6 +410,54 @@ func appLogTimeQuery(raw string) (*time.Time, error) {
 	return &parsed, nil
 }
 
+const (
+	// maxRequestLogIDLength matches the request ID limit used when Home writes request-log files.
+	maxRequestLogIDLength = 128
+	// requestLogDisplayIDLength is the length of short display IDs (the final characters of a stored ID).
+	requestLogDisplayIDLength = 8
+)
+
+// requestLogFileIDPattern captures the request ID part of a "<ip>-<url>-<timestamp>-<id>" filename stem.
+var requestLogFileIDPattern = regexp.MustCompile(`^.+-\d{4}-\d{2}-\d{2}T\d{6}-(.+)$`)
+
+// isSafeRequestLogID reports whether requestID only uses the character set Home
+// allows in request-log filenames: letters, digits, '.', '_' and '-', without "..".
+func isSafeRequestLogID(requestID string) bool {
+	if requestID == "" || len(requestID) > maxRequestLogIDLength || strings.Contains(requestID, "..") {
+		return false
+	}
+	for _, character := range requestID {
+		switch {
+		case character >= 'a' && character <= 'z',
+			character >= 'A' && character <= 'Z',
+			character >= '0' && character <= '9',
+			character == '.', character == '_', character == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// requestLogFileMatches reports whether name is the request-log file for requestID.
+// Filenames are "<ip>-<url>-<timestamp>-<id>.log", so a full ID must follow a '-'
+// separator. An 8-character display ID may also match the final characters of a
+// longer <id> part.
+func requestLogFileMatches(name string, requestID string) bool {
+	stem, ok := strings.CutSuffix(name, ".log")
+	if !ok {
+		return false
+	}
+	if strings.HasSuffix(stem, "-"+requestID) {
+		return true
+	}
+	if len(requestID) != requestLogDisplayIDLength {
+		return false
+	}
+	match := requestLogFileIDPattern.FindStringSubmatch(stem)
+	return match != nil && len(match[1]) > requestLogDisplayIDLength && strings.HasSuffix(match[1], requestID)
+}
+
 type requestLogCandidate struct {
 	name     string
 	modified time.Time
@@ -426,14 +475,16 @@ func findRequestLogFile(dir string, requestID string) (string, string, error) {
 	}
 
 	requestID = strings.TrimSpace(requestID)
-	suffix := requestID + ".log"
+	if !isSafeRequestLogID(requestID) {
+		return "", "", os.ErrNotExist
+	}
 	candidates := make([]requestLogCandidate, 0, 1)
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasSuffix(name, suffix) {
+		if !requestLogFileMatches(name, requestID) {
 			continue
 		}
 		info, errInfo := entry.Info()
