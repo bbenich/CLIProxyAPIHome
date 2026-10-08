@@ -250,15 +250,17 @@ func (m *Manager) SetSelector(selector Selector) {
 		selector = &RoundRobinSelector{}
 	}
 
+	// Swap the manager selector and the scheduler strategy together so readers
+	// holding m.mu never observe one without the other. Lock order is m.mu
+	// before scheduler.mu; the scheduler never acquires m.mu.
 	m.mu.Lock()
 	prev := m.selector
 	m.selector = selector
-	scheduler := m.scheduler
+	if m.scheduler != nil {
+		m.scheduler.setSelector(selector)
+	}
 	m.mu.Unlock()
 
-	if scheduler != nil {
-		scheduler.setSelector(selector)
-	}
 	if stoppable, ok := prev.(StoppableSelector); ok {
 		stoppable.Stop()
 	}
@@ -313,11 +315,14 @@ func (m *Manager) Register(ctx context.Context, auth *Auth) (*Auth, error) {
 	if idx := strings.TrimSpace(next.Index); idx != "" {
 		m.indexAuth[idx] = next
 	}
+	// The scheduler reads its auths under its own lock, so it must never share
+	// the pointer that MarkResult and other writers mutate under m.mu.
+	published := next.Clone()
 	m.mu.Unlock()
 
-	m.scheduler.upsertAuth(next)
-	m.queueRefreshReschedule(next.ID)
-	return next.Clone(), nil
+	m.scheduler.upsertAuth(published)
+	m.queueRefreshReschedule(published.ID)
+	return published.Clone(), nil
 }
 
 // Delete handles delete.
@@ -361,6 +366,7 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	}
 	delete(m.auths, id)
 	loop := m.refreshLoop
+	selector := m.selector
 	m.mu.Unlock()
 
 	if m.scheduler != nil {
@@ -369,7 +375,8 @@ func (m *Manager) Delete(ctx context.Context, id string) error {
 	if loop != nil {
 		loop.remove(id)
 	}
-	if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) }); ok {
+	m.forgetCooldownFence(id)
+	if invalidator, ok := selector.(interface{ InvalidateAuth(string) }); ok {
 		invalidator.InvalidateAuth(id)
 	}
 	return nil
@@ -465,10 +472,11 @@ func (m *Manager) updateWithAcceptance(ctx context.Context, auth *Auth) (*Auth, 
 			m.indexAuth[newIndex] = next
 		}
 	}
+	published := next.Clone()
 	m.mu.Unlock()
-	m.scheduler.upsertAuth(next)
-	m.queueRefreshReschedule(next.ID)
-	return next.Clone(), true, nil
+	m.scheduler.upsertAuth(published)
+	m.queueRefreshReschedule(published.ID)
+	return published.Clone(), true, nil
 }
 
 // persist persists the value.
@@ -652,11 +660,12 @@ func (m *Manager) adoptAuthoritativeAuthLocked(ctx context.Context, authID strin
 	if newIndex != "" {
 		m.indexAuth[newIndex] = authoritative
 	}
+	published := authoritative.Clone()
 	m.mu.Unlock()
-	m.scheduler.upsertAuth(authoritative)
+	m.scheduler.upsertAuth(published)
 	m.reconcileRegistryModelStatesLocked(authID)
 	m.queueRefreshReschedule(authID)
-	return authoritative.Clone(), nil
+	return published.Clone(), nil
 }
 
 func (m *Manager) removeAuthLocked(authID string) {
@@ -671,6 +680,7 @@ func (m *Manager) removeAuthLocked(authID string) {
 	}
 	delete(m.auths, authID)
 	loop := m.refreshLoop
+	selector := m.selector
 	m.mu.Unlock()
 	if m.scheduler != nil {
 		m.scheduler.removeAuth(authID)
@@ -678,9 +688,18 @@ func (m *Manager) removeAuthLocked(authID string) {
 	if loop != nil {
 		loop.remove(authID)
 	}
-	if invalidator, ok := m.selector.(interface{ InvalidateAuth(string) }); ok {
+	m.forgetCooldownFence(authID)
+	if invalidator, ok := selector.(interface{ InvalidateAuth(string) }); ok {
 		invalidator.InvalidateAuth(authID)
 	}
+}
+
+// forgetCooldownFence drops the pending cooldown fence of a removed auth.
+// Fence passes only visit registered auths, so nothing else would clear it.
+func (m *Manager) forgetCooldownFence(authID string) {
+	m.resultPersistMu.Lock()
+	delete(m.cooldownFencePending, authID)
+	m.resultPersistMu.Unlock()
 }
 
 // enqueueResultPersist queues runtime result state for background persistence.
@@ -932,12 +951,12 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 		return nil, false
 	}
 	m.mu.RLock()
-	a := m.auths[id]
+	a := m.auths[id].Clone()
 	m.mu.RUnlock()
 	if a == nil {
 		return nil, false
 	}
-	return a.Clone(), true
+	return a, true
 }
 
 // GetByIndex returns a by index.
@@ -950,12 +969,12 @@ func (m *Manager) GetByIndex(index string) (*Auth, bool) {
 		return nil, false
 	}
 	m.mu.RLock()
-	a := m.indexAuth[index]
+	a := m.indexAuth[index].Clone()
 	m.mu.RUnlock()
 	if a == nil {
 		return nil, false
 	}
-	return a.Clone(), true
+	return a, true
 }
 
 // RefreshSchedulerEntry refreshes refresh scheduler entry.
@@ -1333,10 +1352,16 @@ func (m *Manager) Dispatch(ctx context.Context, providers []string, requestedMod
 		requestRetry = 0
 	}
 
-	if !m.hasPluginScheduler() && m.useSchedulerFastPath() {
+	m.mu.RLock()
+	fastPathSelector := m.selector
+	m.mu.RUnlock()
+	if m.scheduler != nil && !m.hasPluginScheduler() && isBuiltInSelector(fastPathSelector) {
+		// Pick with the strategy of the selector that chose this path so a
+		// concurrent SetSelector cannot mix two selectors in one dispatch.
+		fastPathStrategy := selectorStrategy(fastPathSelector)
 		tried := cloneAuthIDSet(excludedAuthIDs)
 		for {
-			auth, providerKey, errPick := m.scheduler.pickMixed(ctx, providers, routeModel, opts, tried)
+			auth, providerKey, errPick := m.scheduler.pickMixedWithStrategy(ctx, providers, routeModel, opts, tried, fastPathStrategy)
 			if errPick != nil {
 				return nil, m.finalizeDispatchUnavailableError(errPick, providers, routeModel, opts, excludedAuthIDs, tried, defaultRequestRetry)
 			}
@@ -1440,6 +1465,13 @@ func (m *Manager) Dispatch(ctx context.Context, providers []string, requestedMod
 			if concurrencyCandidateExcluded(opts, candidate.ID, dispatchCandidate.upstreamKey) {
 				continue
 			}
+			// Selectors and the post-selection checks run after RUnlock, so they
+			// must read snapshots instead of the pointers MarkResult mutates.
+			snapshot := candidate.Clone()
+			if dispatchCandidate.availabilityAuth == candidate {
+				dispatchCandidate.availabilityAuth = snapshot
+			}
+			dispatchCandidate.auth = snapshot
 			dispatchCandidates = append(dispatchCandidates, dispatchCandidate)
 			availableAuths = append(availableAuths, dispatchCandidate.availabilityAuth)
 		}
@@ -1463,7 +1495,7 @@ func (m *Manager) Dispatch(ctx context.Context, providers []string, requestedMod
 
 		if auth == nil {
 			if isBuiltInSelector(selector) && len(excludedConcurrencyCandidatesFromOptions(opts)) == 0 {
-				builtinAuth, handledBuiltin, errBuiltinPick := m.pickViaBuiltinScheduler(ctx, schedulerStrategyCurrent, providerForSelector, normalizedProviders, routeModel, opts, tried)
+				builtinAuth, handledBuiltin, errBuiltinPick := m.pickViaBuiltinScheduler(ctx, selectorStrategy(selector), providerForSelector, normalizedProviders, routeModel, opts, tried)
 				if errBuiltinPick != nil {
 					return nil, errBuiltinPick
 				}
@@ -2320,8 +2352,10 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 		return false
 	}
 	ApplyRefreshPendingState(auth, now)
-	m.auths[id] = auth
+	published := auth.Clone()
 	m.mu.Unlock()
+	// Keep the scheduler snapshot in step with the in-place mutation.
+	m.scheduler.upsertAuth(published)
 	return true
 }
 
@@ -2584,6 +2618,7 @@ func (m *Manager) stopAutoRefresh(stopSelector bool) {
 	cancel := m.refreshCancel
 	m.refreshCancel = nil
 	m.refreshLoop = nil
+	selector := m.selector
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -2591,7 +2626,7 @@ func (m *Manager) stopAutoRefresh(stopSelector bool) {
 	if !stopSelector {
 		return
 	}
-	if stoppable, ok := m.selector.(StoppableSelector); ok {
+	if stoppable, ok := selector.(StoppableSelector); ok {
 		stoppable.Stop()
 	}
 }
@@ -2619,7 +2654,7 @@ func (m *Manager) RefreshNowObserved(ctx context.Context, authIndex, observedAcc
 	m.mu.RLock()
 	requested := m.indexAuth[authIndex]
 	targetIndex := authIndex
-	target := m.indexAuth[targetIndex]
+	target := m.indexAuth[targetIndex].Clone()
 	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
 	m.mu.RUnlock()
 	if requested == nil || target == nil {
@@ -2827,7 +2862,7 @@ func (m *Manager) refreshAuth(ctx context.Context, authID string) *Auth {
 	}
 
 	m.mu.RLock()
-	current := m.auths[authID]
+	current := m.auths[authID].Clone()
 	autoRefreshHandler := m.autoRefreshHandler
 	m.mu.RUnlock()
 	if current == nil {
