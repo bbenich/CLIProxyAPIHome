@@ -218,6 +218,9 @@ func registerClusterManagementRoutes(r *RouteRegistry, handler *clustermanagemen
 	r.Set(http.MethodGet, "/credentials/:credential_id/concurrency-policy", handler.GetCredentialConcurrencyPolicy)
 	r.Set(http.MethodPatch, "/credentials/:credential_id/concurrency-policy", handler.PatchCredentialConcurrencyPolicy)
 	r.Set(http.MethodDelete, "/credentials/:credential_id/cooldown", handler.ClearCredentialCooldown)
+	r.Set(http.MethodGet, "/quota/users", handler.GetQuotaUserScopes)
+	r.Set(http.MethodGet, "/quota/recent-usage", handler.GetQuotaRecentUsage)
+	r.Set(http.MethodGet, "/quota/routing", handler.GetQuotaRouting)
 	r.Set(http.MethodGet, "/quota/credentials", handler.ListQuotaCredentials)
 	r.Set(http.MethodGet, "/quota/credentials/:credential_id", handler.GetQuotaCredential)
 	r.Set(http.MethodPost, "/quota/collect", handler.CollectQuota)
@@ -402,6 +405,12 @@ func serveManagementControlPanel(cfg *cpaconfig.Config, configFilePath string, a
 			return
 		}
 
+		if servePanelNavigation(c) {
+			if errClose := file.Close(); errClose != nil {
+				log.WithError(errClose).Warn("failed to close panel asset")
+			}
+			return
+		}
 		serveManagementAssetFile(c, file, "no-cache")
 	}
 }
@@ -541,6 +550,12 @@ func registerManagementControlPanelRoutes(engine *gin.Engine, handlerFor func(as
 	}
 	engine.GET("/", handlerFor(managementasset.IndexFileName))
 	engine.GET("/index.html", handlerFor(managementasset.IndexFileName))
+	engine.GET("/quota-dashboard.html", handlerFor("quota-dashboard.html"))
+	engine.GET("/home-panel.html", handlerFor(managementasset.IndexFileName))
+	engine.GET("/home-management-panel.html", handlerFor(managementasset.ManagementFileName))
+	engine.GET("/quota-panel.html", handlerFor("quota-dashboard.html"))
+	engine.GET("/console.html", handlerFor("console.html"))
+	engine.GET("/console-panel.html", handlerFor("console.html"))
 	engine.GET("/management.html", handlerFor(managementasset.ManagementFileName))
 	engine.GET("/user.html", handlerFor(managementasset.UserFileName))
 	engine.GET("/assets/*filepath", assetsHandler)
