@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -22,11 +23,20 @@ func IsRESPPrefix(prefix byte) bool {
 	}
 }
 
-// Serve handles serve.
+// tlsHandshakeTimeout bounds how long a client may take to finish a TLS
+// handshake before its connection is dropped.
+var tlsHandshakeTimeout = 10 * time.Second
+
+// Serve accepts connections and routes each one to RESP or HTTP handling.
+// Protocol detection runs per connection, off the accept loop, so a silent or
+// slow client cannot block later connections. Connections still being
+// classified are closed when ctx is canceled.
 func Serve(ctx context.Context, listener net.Listener, httpListener *Listener, onRESPConn func(net.Conn), onHTTPConn func(net.Conn), tlsConfig *tls.Config) error {
-	// Decode the wire frame before dispatching command handling.
 	if listener == nil {
 		return net.ErrClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	for {
@@ -37,91 +47,101 @@ func Serve(ctx context.Context, listener net.Listener, httpListener *Listener, o
 		if conn == nil {
 			continue
 		}
-
-		if routed := routeTLSConn(conn, httpListener, onHTTPConn); routed {
-			continue
-		}
-
-		reader := bufio.NewReader(conn)
-		prefix, errPeek := reader.Peek(1)
-		if errPeek != nil {
-			if errClose := conn.Close(); errClose != nil {
-				log.Errorf("protocol mux: close conn after peek error: %v", errClose)
-			}
-			continue
-		}
-
-		if tlsConfig != nil && isTLSClientHello(prefix[0]) {
-			tlsConn := tls.Server(&BufferedConn{Conn: conn, reader: reader}, tlsConfig)
-			if errHandshake := tlsConn.Handshake(); errHandshake != nil {
-				if errClose := conn.Close(); errClose != nil {
-					log.Errorf("protocol mux: close conn after TLS handshake error: %v", errClose)
-				}
-				continue
-			}
-			if routed := routeTLSConn(tlsConn, httpListener, onHTTPConn); routed {
-				continue
-			}
-			reader = bufio.NewReader(tlsConn)
-			prefix, errPeek = reader.Peek(1)
-			if errPeek != nil {
-				if errClose := tlsConn.Close(); errClose != nil {
-					log.Errorf("protocol mux: close tls conn after peek error: %v", errClose)
-				}
-				continue
-			}
-			conn = tlsConn
-		}
-
-		wrapped := &BufferedConn{Conn: conn, reader: reader}
-		if IsRESPPrefix(prefix[0]) {
-			if onRESPConn != nil {
-				onRESPConn(wrapped)
-			} else {
-				_ = wrapped.Close()
-			}
-			continue
-		}
-
-		if onHTTPConn != nil {
-			onHTTPConn(wrapped)
-			continue
-		}
-		if httpListener == nil {
-			_ = wrapped.Close()
-			continue
-		}
-		if errPut := httpListener.Put(wrapped); errPut != nil {
-			if errClose := wrapped.Close(); errClose != nil {
-				log.Errorf("protocol mux: close conn after http route failure: %v", errClose)
-			}
-		}
+		go dispatchConn(ctx, conn, httpListener, onRESPConn, onHTTPConn, tlsConfig)
 	}
 }
 
-func routeTLSConn(conn net.Conn, httpListener *Listener, onHTTPConn func(net.Conn)) bool {
-	tlsConn, ok := conn.(*tls.Conn)
-	if !ok {
-		return false
+func dispatchConn(ctx context.Context, conn net.Conn, httpListener *Listener, onRESPConn func(net.Conn), onHTTPConn func(net.Conn), tlsConfig *tls.Config) {
+	stopClose := context.AfterFunc(ctx, func() { closeConn(conn, "after shutdown") })
+	routed, isHTTP := classifyConn(ctx, conn, tlsConfig)
+	if !stopClose() || routed == nil {
+		// Shutdown already closed the connection, or classification closed it.
+		return
 	}
-	if errHandshake := tlsConn.Handshake(); errHandshake != nil {
-		if errClose := conn.Close(); errClose != nil {
-			log.Errorf("protocol mux: close conn after TLS handshake error: %v", errClose)
+	if isHTTP {
+		routeHTTPConn(routed, httpListener, onHTTPConn)
+		return
+	}
+	if onRESPConn != nil {
+		onRESPConn(routed)
+		return
+	}
+	closeConn(routed, "without RESP handler")
+}
+
+// classifyConn completes any TLS handshake and reports whether the connection
+// carries HTTP. It returns nil after closing connections that fail detection.
+func classifyConn(ctx context.Context, conn net.Conn, tlsConfig *tls.Config) (net.Conn, bool) {
+	// TLS listeners hand over *tls.Conn; negotiated HTTP protocols route directly.
+	if tlsConn, ok := conn.(*tls.Conn); ok {
+		if !completeHandshake(ctx, tlsConn, conn) {
+			return nil, false
 		}
-		return true
+		if negotiatedHTTP(tlsConn) {
+			return tlsConn, true
+		}
 	}
-	proto := strings.TrimSpace(tlsConn.ConnectionState().NegotiatedProtocol)
-	if proto != "h2" && proto != "http/1.1" {
+
+	reader := bufio.NewReader(conn)
+	prefix, errPeek := reader.Peek(1)
+	if errPeek != nil {
+		closeConn(conn, "after peek error")
+		return nil, false
+	}
+
+	if tlsConfig != nil && isTLSClientHello(prefix[0]) {
+		tlsConn := tls.Server(&BufferedConn{Conn: conn, reader: reader}, tlsConfig)
+		if !completeHandshake(ctx, tlsConn, conn) {
+			return nil, false
+		}
+		if negotiatedHTTP(tlsConn) {
+			return tlsConn, true
+		}
+		reader = bufio.NewReader(tlsConn)
+		prefix, errPeek = reader.Peek(1)
+		if errPeek != nil {
+			closeConn(tlsConn, "after TLS peek error")
+			return nil, false
+		}
+		conn = tlsConn
+	}
+
+	return &BufferedConn{Conn: conn, reader: reader}, !IsRESPPrefix(prefix[0])
+}
+
+func completeHandshake(ctx context.Context, tlsConn *tls.Conn, raw net.Conn) bool {
+	handshakeCtx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+	defer cancel()
+	if errHandshake := tlsConn.HandshakeContext(handshakeCtx); errHandshake != nil {
+		closeConn(raw, "after TLS handshake error")
 		return false
-	}
-	if onHTTPConn != nil {
-		onHTTPConn(tlsConn)
-	} else if httpListener != nil {
-		_ = httpListener.Put(tlsConn)
-	} else {
-		_ = conn.Close()
 	}
 	return true
+}
+
+func negotiatedHTTP(tlsConn *tls.Conn) bool {
+	proto := strings.TrimSpace(tlsConn.ConnectionState().NegotiatedProtocol)
+	return proto == "h2" || proto == "http/1.1"
+}
+
+func routeHTTPConn(conn net.Conn, httpListener *Listener, onHTTPConn func(net.Conn)) {
+	if onHTTPConn != nil {
+		onHTTPConn(conn)
+		return
+	}
+	if httpListener == nil {
+		closeConn(conn, "without HTTP handler")
+		return
+	}
+	if errPut := httpListener.Put(conn); errPut != nil {
+		closeConn(conn, "after http route failure")
+	}
+}
+
+func closeConn(conn net.Conn, reason string) {
+	if errClose := conn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+		log.Errorf("protocol mux: close conn %s: %v", reason, errClose)
+	}
 }
 
 func isTLSClientHello(prefix byte) bool {
