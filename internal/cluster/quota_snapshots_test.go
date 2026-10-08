@@ -1891,3 +1891,34 @@ func seedQuotaSnapshotAuth(t *testing.T, repo *Repository, id string, provider s
 		t.Fatalf("UpsertAuth(%s) error = %v", id, errUpsert)
 	}
 }
+
+func TestScheduledIdleQuotaClaimHonorsCurrentScheduleAndLease(t *testing.T) {
+	ctx := context.Background()
+	repo, closeRepo := newBillingTestRepository(t, ctx)
+	defer closeRepo()
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	seedQuotaSnapshotAuth(t, repo, "scheduled-idle", "codex", "Idle", map[string]any{"type": "codex"})
+	claim := func(want bool) {
+		t.Helper()
+		got, err := repo.ClaimScheduledIdleQuotaProbe(ctx, "scheduled-idle", "scheduled", now, time.Minute)
+		if err != nil || got != want {
+			t.Fatalf("claim=%v err=%v want=%v", got, err, want)
+		}
+	}
+	claim(true) // No activity is required, but the outstanding lease is authoritative.
+	claim(false)
+	next := now.Add(time.Hour)
+	if err := repo.FailQuotaProbeAt(ctx, "scheduled-idle", "scheduled", QuotaCollectionError{Code: "fixture", Message: "fixture"}, next, now); err != nil {
+		t.Fatal(err)
+	}
+	claim(false) // New backoff committed after candidate discovery must win.
+	now = next.Add(time.Second)
+	claim(true)
+	observed, expires := now, now.Add(time.Minute)
+	if _, err := repo.UpsertQuotaSnapshot(ctx, QuotaSnapshotWrite{CredentialID: "scheduled-idle", QuotaStatus: "healthy", Source: "active_probe", CollectionStatus: "success", ObservedAt: &observed, ExpiresAt: &expires, NextProbeAt: &expires, ParserVersion: codexQuotaSnapshotVersion, CollectorVersion: codexQuotaSnapshotVersion, ExpectedProbeOwner: "scheduled", ClearProbeLease: true}); err != nil {
+		t.Fatal(err)
+	}
+	claim(false) // A newly committed fresh snapshot is not force-probed either.
+	now = expires.Add(time.Second)
+	claim(true)
+}

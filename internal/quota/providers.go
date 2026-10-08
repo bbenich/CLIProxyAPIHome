@@ -31,6 +31,7 @@ func (c *Collector) probeClaude(ctx context.Context, auth *coreauth.Auth) (probe
 	if errProfile != nil {
 		result.partial = true
 		result.collectionError = probeCollectionError(errProfile, c.options.Now().UTC())
+		result.retryAfter = errProfile.retryAfter
 		return result, nil
 	}
 	if !validClaudeProfile(profileBody) {

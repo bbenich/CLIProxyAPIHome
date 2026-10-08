@@ -295,6 +295,19 @@ func run() int {
 		log.Errorf("failed to init runtime")
 		return 1
 	}
+	rt.SetQuotaSnapshotReader(func(ctx context.Context, id string, now time.Time) (*home.QuotaRoutingSnapshot, error) {
+		quotaSnapshot, errGetQuotaCredential := repo.GetQuotaCredential(ctx, id, now)
+		if errGetQuotaCredential != nil {
+			return nil, errGetQuotaCredential
+		}
+		result := &home.QuotaRoutingSnapshot{ObservedAt: quotaSnapshot.ObservedAt, Freshness: quotaSnapshot.Freshness, QuotaStatus: quotaSnapshot.QuotaStatus}
+		for _, window := range quotaSnapshot.Windows {
+			result.Windows = append(result.Windows, home.QuotaRoutingWindow{Scope: window.Scope,
+				RemainingRatio: window.RemainingRatio, UsedRatio: window.UsedRatio, Remaining: window.Remaining,
+				Used: window.Used, Limit: window.Limit, ResetAt: window.ResetAt, WindowSeconds: window.WindowSeconds})
+		}
+		return result, nil
+	})
 	pluginAuthService := pluginauth.NewService(repo)
 	rt.SetPluginStoreAuthResolver(pluginAuthService.Resolved)
 	rt.SetPluginSyncConfigLoader(func(ctx context.Context) (*config.Config, error) {
@@ -410,7 +423,14 @@ func run() int {
 	userMailService.Start(runCtx)
 	quotaHomeID := net.JoinHostPort(clusterClientAddr, strconv.Itoa(clusterAdvertisedPort))
 	quotaCollector := quotacollector.NewCollector(repo, quotacollector.Options{
-		HomeID: quotaHomeID,
+		HomeID:            quotaHomeID,
+		SnapshotFreshness: time.Minute,
+		PollInterval:      15 * time.Second,
+		StaggerInterval:   15 * time.Second,
+		TrackIdleCredentials: func() bool {
+			current := rt.Config()
+			return current != nil && (strings.EqualFold(strings.TrimSpace(current.Routing.Strategy), "quota-reset") || os.Getenv("CLI_PROXY_QUOTA_MONITOR") == "1")
+		},
 		GlobalProxyURLProvider: func() string {
 			currentConfig := rt.Config()
 			if currentConfig == nil {

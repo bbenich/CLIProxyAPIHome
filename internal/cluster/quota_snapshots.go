@@ -596,21 +596,27 @@ func quotaWindowRecordAggregateSource(windows []QuotaWindowRecord) string {
 }
 
 func (r *Repository) ClaimQuotaProbe(ctx context.Context, credentialID string, owner string, now time.Time, leaseDuration time.Duration) (bool, error) {
-	return r.claimQuotaProbe(ctx, credentialID, owner, now, leaseDuration, false, false)
+	return r.claimQuotaProbe(ctx, credentialID, owner, now, leaseDuration, false, false, false)
 }
 
 // ClaimEligibleQuotaProbe claims a lease only while the current DB credential remains eligible.
 func (r *Repository) ClaimEligibleQuotaProbe(ctx context.Context, credentialID string, owner string, now time.Time, leaseDuration time.Duration) (bool, error) {
-	return r.claimQuotaProbe(ctx, credentialID, owner, now, leaseDuration, true, false)
+	return r.claimQuotaProbe(ctx, credentialID, owner, now, leaseDuration, true, false, false)
 }
 
 // ForceClaimEligibleQuotaProbe claims an eligible credential while ignoring its
 // snapshot freshness and retry schedule. An unexpired probe lease still wins.
 func (r *Repository) ForceClaimEligibleQuotaProbe(ctx context.Context, credentialID string, owner string, now time.Time, leaseDuration time.Duration) (bool, error) {
-	return r.claimQuotaProbe(ctx, credentialID, owner, now, leaseDuration, true, true)
+	return r.claimQuotaProbe(ctx, credentialID, owner, now, leaseDuration, true, true, false)
 }
 
-func (r *Repository) claimQuotaProbe(ctx context.Context, credentialID string, owner string, now time.Time, leaseDuration time.Duration, requireEligible bool, force bool) (bool, error) {
+// ClaimScheduledIdleQuotaProbe bypasses the activity gate while atomically
+// honoring the current retry/freshness schedule and any outstanding lease.
+func (r *Repository) ClaimScheduledIdleQuotaProbe(ctx context.Context, credentialID string, owner string, now time.Time, leaseDuration time.Duration) (bool, error) {
+	return r.claimQuotaProbe(ctx, credentialID, owner, now, leaseDuration, true, false, true)
+}
+
+func (r *Repository) claimQuotaProbe(ctx context.Context, credentialID string, owner string, now time.Time, leaseDuration time.Duration, requireEligible bool, force bool, idle bool) (bool, error) {
 	credentialID = strings.TrimSpace(credentialID)
 	owner = strings.TrimSpace(owner)
 	if credentialID == "" || owner == "" {
@@ -670,7 +676,7 @@ func (r *Repository) claimQuotaProbe(ctx context.Context, credentialID string, o
 				(record.LastActiveProbeAt == nil || record.ProbeActivityAt.After(record.LastActiveProbeAt.UTC()))
 		}
 		var claimActivityAt *time.Time
-		if requireEligible && !force {
+		if requireEligible && !force && !idle {
 			activityAfter := now.Add(-quotaProbeActivityWindow)
 			if errFind == nil && record.LastActiveProbeAt != nil && record.LastActiveProbeAt.After(activityAfter) {
 				activityAfter = record.LastActiveProbeAt.UTC()
@@ -704,7 +710,7 @@ func (r *Repository) claimQuotaProbe(ctx context.Context, credentialID string, o
 		if errFind == nil {
 			upgradeClaim = record.CollectorVersion < targetCollectorVersion
 			observationInFuture = record.ObservedAt != nil && record.ObservedAt.After(now.Add(quotaMaxFutureObservationSkew))
-			if !force && !observationInFuture && !upgradeClaim {
+			if !force && (idle || (!observationInFuture && !upgradeClaim)) {
 				if record.NextProbeAt != nil && record.NextProbeAt.After(now) {
 					return nil
 				}

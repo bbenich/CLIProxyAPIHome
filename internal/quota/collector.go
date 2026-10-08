@@ -51,24 +51,28 @@ var defaultAntigravityURLs = []string{
 }
 
 type Options struct {
+	TrackIdleCredentials   func() bool
 	Owner                  string
 	HomeID                 string
 	GlobalProxyURL         string
 	GlobalProxyURLProvider func() string
 	PollInterval           time.Duration
-	ProbeTimeout           time.Duration
-	LeaseDuration          time.Duration
-	SnapshotFreshness      time.Duration
-	ProviderConcurrency    int
-	CodexUsageURL          string
-	CodexResetCreditsURL   string
-	ClaudeUsageURL         string
-	ClaudeProfileURL       string
-	KimiUsageURL           string
-	XAIBillingURL          string
-	AntigravityURLs        []string
-	Now                    func() time.Time
-	HTTPClient             func(*coreauth.Auth, time.Duration) (*http.Client, error)
+	// StaggerInterval enables a shared paced scheduler for automatic and manual
+	// probes. Manual requests then respect freshness and failure backoff too.
+	StaggerInterval      time.Duration
+	ProbeTimeout         time.Duration
+	LeaseDuration        time.Duration
+	SnapshotFreshness    time.Duration
+	ProviderConcurrency  int
+	CodexUsageURL        string
+	CodexResetCreditsURL string
+	ClaudeUsageURL       string
+	ClaudeProfileURL     string
+	KimiUsageURL         string
+	XAIBillingURL        string
+	AntigravityURLs      []string
+	Now                  func() time.Time
+	HTTPClient           func(*coreauth.Auth, time.Duration) (*http.Client, error)
 }
 
 type Collector struct {
@@ -80,6 +84,9 @@ type Collector struct {
 	onDemandMu    sync.Mutex
 	onDemandJobs  map[string]struct{}
 	background    sync.WaitGroup
+	scheduleMu    sync.Mutex
+	lastSlot      time.Time
+	attempts      map[string]time.Time
 }
 
 func NewCollector(repo *cluster.Repository, options Options) *Collector {
@@ -145,6 +152,7 @@ func NewCollector(repo *cluster.Repository, options Options) *Collector {
 		options:      options,
 		providerSem:  make(map[string]chan struct{}),
 		onDemandJobs: make(map[string]struct{}),
+		attempts:     make(map[string]time.Time),
 	}
 	if repo.DialectName() == "sqlite" {
 		collector.globalSem = make(chan struct{}, options.ProviderConcurrency)
@@ -183,6 +191,16 @@ func (c *Collector) collect(ctx context.Context) {
 		log.WithError(errAuths).Warn("quota collector: list credentials failed")
 		return
 	}
+	if c.options.StaggerInterval > 0 {
+		c.collectStaggered(ctx, auths)
+		return
+	}
+	if c.options.TrackIdleCredentials != nil && c.options.TrackIdleCredentials() {
+		// Only bypass the activity gate. Freshness and backoff are checked in
+		// the same transaction as lease acquisition, including after queueing.
+		c.collectCredentialsWithMode(ctx, auths, false, true)
+		return
+	}
 	c.collectCredentials(ctx, auths, false)
 }
 
@@ -190,6 +208,8 @@ func (c *Collector) collect(ctx context.Context) {
 // matching credentials and returns how many new local jobs were accepted.
 // Empty filters accept every eligible credential. The round runs on a detached
 // context so it outlives the caller (for example an HTTP request).
+// With StaggerInterval enabled, requests join the shared scheduled queue instead
+// and cannot bypass snapshot freshness or failure backoff.
 func (c *Collector) TriggerCollection(ctx context.Context, credentialIDs map[string]struct{}, providers map[string]struct{}) (int, error) {
 	if c == nil || c.repo == nil {
 		return 0, fmt.Errorf("quota collector is unavailable")
@@ -218,6 +238,12 @@ func (c *Collector) TriggerCollection(ctx context.Context, credentialIDs map[str
 			}
 		}
 		credentialID := strings.TrimSpace(auth.ID)
+		if c.options.StaggerInterval > 0 {
+			item, err := c.repo.GetQuotaCredential(ctx, credentialID, c.options.Now().UTC())
+			if err != nil || !scheduledSnapshotDue(item, c.options.Now().UTC()) {
+				continue
+			}
+		}
 		if _, exists := c.onDemandJobs[credentialID]; exists {
 			continue
 		}
@@ -225,7 +251,7 @@ func (c *Collector) TriggerCollection(ctx context.Context, credentialIDs map[str
 		accepted = append(accepted, auth)
 	}
 	c.onDemandMu.Unlock()
-	if len(accepted) > 0 {
+	if len(accepted) > 0 && c.options.StaggerInterval <= 0 {
 		c.background.Add(1)
 		go func() {
 			defer c.background.Done()
@@ -245,6 +271,10 @@ func (c *Collector) Wait() {
 }
 
 func (c *Collector) collectCredentials(ctx context.Context, auths []*coreauth.Auth, force bool) {
+	c.collectCredentialsWithMode(ctx, auths, force, false)
+}
+
+func (c *Collector) collectCredentialsWithMode(ctx context.Context, auths []*coreauth.Auth, force bool, idle bool) {
 	var wait sync.WaitGroup
 	for _, auth := range auths {
 		if !quotaProbeEligible(auth) {
@@ -266,7 +296,7 @@ func (c *Collector) collectCredentials(ctx context.Context, auths []*coreauth.Au
 				return
 			}
 			defer func() { <-release }()
-			c.collectCredential(ctx, candidate, force)
+			c.collectCredentialWithMode(ctx, candidate, force, idle)
 		}(auth, sem)
 	}
 	wait.Wait()
@@ -297,11 +327,17 @@ func (c *Collector) releaseOnDemandJob(auth *coreauth.Auth) {
 }
 
 func (c *Collector) collectCredential(ctx context.Context, auth *coreauth.Auth, force bool) {
+	c.collectCredentialWithMode(ctx, auth, force, false)
+}
+
+func (c *Collector) collectCredentialWithMode(ctx context.Context, auth *coreauth.Auth, force bool, idle bool) (attempted bool) {
 	now := c.options.Now().UTC()
 	var claimed bool
 	var errClaim error
 	if force {
 		claimed, errClaim = c.repo.ForceClaimEligibleQuotaProbe(ctx, auth.ID, c.options.Owner, now, c.options.LeaseDuration)
+	} else if idle {
+		claimed, errClaim = c.repo.ClaimScheduledIdleQuotaProbe(ctx, auth.ID, c.options.Owner, now, c.options.LeaseDuration)
 	} else {
 		claimed, errClaim = c.repo.ClaimEligibleQuotaProbe(ctx, auth.ID, c.options.Owner, now, c.options.LeaseDuration)
 	}
@@ -312,6 +348,7 @@ func (c *Collector) collectCredential(ctx context.Context, auth *coreauth.Auth, 
 	if !claimed {
 		return
 	}
+	attempted = true
 	resolveCtx, cancelResolve := context.WithTimeout(ctx, c.options.ProbeTimeout)
 	resolved, _, errResolve := c.repo.GetAuth(resolveCtx, auth.ID)
 	cancelResolve()
@@ -327,6 +364,11 @@ func (c *Collector) collectCredential(ctx context.Context, auth *coreauth.Auth, 
 	}
 	observedAt := c.options.Now().UTC()
 	expiresAt := observedAt.Add(c.options.SnapshotFreshness)
+	nextProbeAt := expiresAt
+	failures := 0
+	if result.partial && result.collectionError != nil && result.collectionError.Code == "UPSTREAM_RATE_LIMITED" {
+		nextProbeAt, failures = c.failureSchedule(ctx, auth.ID, &probeError{retryable: true, retryAfter: result.retryAfter})
+	}
 	status := quotaWindowAggregateStatus(result.windows)
 	collectionStatus := "success"
 	if result.partial {
@@ -336,7 +378,7 @@ func (c *Collector) collectCredential(ctx context.Context, auth *coreauth.Auth, 
 	input := cluster.QuotaSnapshotWrite{
 		CredentialID: auth.ID, QuotaStatus: status, CollectionStatus: collectionStatus, Source: "active_probe",
 		ObservedAt: &observedAt, MaxAcceptedObservedAt: &observedAt, ExpiresAt: &expiresAt, LastAttemptAt: &observedAt, LastSuccessAt: &observedAt,
-		NextProbeAt: &expiresAt, ConsecutiveFailure: 0, Error: result.collectionError, Plan: result.plan, ReplacePlan: true, ParserVersion: snapshotVersion, CollectorVersion: snapshotVersion,
+		NextProbeAt: &nextProbeAt, ConsecutiveFailure: failures, Error: result.collectionError, Plan: result.plan, ReplacePlan: true, ParserVersion: snapshotVersion, CollectorVersion: snapshotVersion,
 		ResetCredits: result.resetCredits, ReplaceResetCredits: result.replaceResetCredits,
 		ExpectedProbeOwner: c.options.Owner, ClearProbeLease: true, ReplaceWindows: result.replaceWindows, Windows: result.windows,
 	}
@@ -362,6 +404,7 @@ func (c *Collector) collectCredential(ctx context.Context, auth *coreauth.Auth, 
 			"observed_at":   observedAt,
 		}).Debug("quota collector: snapshot persisted")
 	}
+	return
 }
 
 type probeResult struct {
@@ -372,6 +415,7 @@ type probeResult struct {
 	replaceWindows      bool
 	replaceResetCredits bool
 	collectionError     *cluster.QuotaCollectionError
+	retryAfter          time.Duration
 }
 
 func (c *Collector) probeCredential(ctx context.Context, auth *coreauth.Auth) (probeResult, *probeError) {
@@ -425,6 +469,7 @@ func (c *Collector) probeCodex(ctx context.Context, auth *coreauth.Auth) (probeR
 		if codexResetCreditDetailsRequired(usage.resetCreditsAvailableCount) {
 			result.partial = true
 			result.collectionError = probeCollectionError(errResetRequest, observedAt)
+			result.retryAfter = errResetRequest.retryAfter
 		}
 		return result, nil
 	}
@@ -509,16 +554,18 @@ func (c *Collector) probeRequest(ctx context.Context, auth *coreauth.Auth, metho
 	return payload, resp.Header, nil
 }
 
-func (c *Collector) failProbe(ctx context.Context, credentialID string, failure *probeError) {
-	if failure == nil {
-		return
-	}
+func (c *Collector) failureSchedule(ctx context.Context, credentialID string, failure *probeError) (time.Time, int) {
 	now := c.options.Now().UTC()
 	delay := defaultFailureBackoff
+	failures := 1
+	item, errGet := c.repo.GetQuotaCredential(ctx, credentialID, now)
+	if errGet == nil {
+		failures += item.ConsecutiveFailure
+	}
 	if !failure.retryable {
 		delay = maxFailureBackoff
 	} else {
-		if item, errGet := c.repo.GetQuotaCredential(ctx, credentialID, now); errGet == nil && item.ConsecutiveFailure > 0 {
+		if errGet == nil && item.ConsecutiveFailure > 0 {
 			for index := 0; index < item.ConsecutiveFailure && delay < maxFailureBackoff; index++ {
 				delay *= 2
 			}
@@ -531,7 +578,15 @@ func (c *Collector) failProbe(ctx context.Context, credentialID string, failure 
 		delay = failure.retryAfter
 	}
 	delay = quotaBackoffWithJitter(delay, credentialID)
-	nextProbeAt := now.Add(delay)
+	return now.Add(delay), failures
+}
+
+func (c *Collector) failProbe(ctx context.Context, credentialID string, failure *probeError) {
+	if failure == nil {
+		return
+	}
+	now := c.options.Now().UTC()
+	nextProbeAt, _ := c.failureSchedule(ctx, credentialID, failure)
 	occurredAt := now
 	collectionError := cluster.QuotaCollectionError{Code: failure.code, Message: failure.message, Retryable: failure.retryable, OccurredAt: &occurredAt}
 	if failure.statusCode > 0 {
