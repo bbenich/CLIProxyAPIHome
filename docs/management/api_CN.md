@@ -221,6 +221,9 @@ DB-backed handler 通常同时返回机器可读 `error` 和可读 `message`：
 | `PATCH` | `/proxy/proxy-pools/:id` |
 | `POST` | `/proxy/proxy-pools/:id/test` |
 | `POST` | `/quota/collect` |
+| `GET` | `/quota/users`（本地扩展） |
+| `GET` | `/quota/recent-usage`（本地扩展） |
+| `GET` | `/quota/routing`（本地扩展） |
 | `GET` | `/quota/credentials` |
 | `GET` | `/quota/credentials/:credential_id` |
 | `GET` | `/request-events` |
@@ -2455,7 +2458,7 @@ Home 先调用匹配插件。插件接管请求时，成功以 `200` 直接返�
 { "accepted": 1, "running": true, "credential_id": "credential-uuid" }
 ```
 
-`accepted` 可以为 `0`；`running` 精确表示 `accepted > 0`，不是全局采集器运行状态。异步采集后通过 `/quota/credentials/:credential_id` 读取持久化快照。即使显式指定插件，该插件未接管时仍可回退到内置采集器。
+`accepted` 可以为 `0`；`running` 精确表示 `accepted > 0`，不是全局采集器运行状态。内置采集遵循与 `POST /quota/collect` 相同的调度规则，快照仍有效或处于重试退避时 `accepted` 为 `0`。异步采集后通过 `/quota/credentials/:credential_id` 读取持久化快照。即使显式指定插件，该插件未接管时仍可回退到内置采集器。
 
 插件同步响应示例：
 
@@ -2722,9 +2725,9 @@ Home 管理的 CPA 使用数据库支持的 observation 配置。`credentials.in
 
 当前被动采集从 CPA usage 事件的 `response_headers` 中提取受限 `quota_headers`。Home 只保留 Codex `X-Codex-*` 额度 Header allowlist，以及通过语法校验且不具有 secret 特征的 upstream request ID，并在 usage payload 入库前删除 raw `response_headers`。核心事务开始前，会并发地按 active auth UUID、runtime index、ID 依次解析上报的 `auth_index`，并把稳定 UUID、规范化 Provider/凭证类型身份与额度身份代次写入 usage 行；并发删除或身份变更会通过代次隔离该行与替换后的凭证，不会串行化 usage 入库。核心 usage/billing 事务提交后，Codex Header 观测才在隔离的额度事务中归一化并 upsert；非法额度元数据或额度持久化失败都不能回滚核心 usage 或 billing 写入。比 Home 接收时间超前五分钟以上的时间戳会归一化为接收时间。迟到事件不能覆盖更新快照，首次并发写入也遵守该规则。Codex Header 观测始终视为稀疏滚动更新：按稳定 limit 身份和周期合并，保留仍有效的旧窗口以及权威主动探测得到的元数据，不清除正在执行的 probe lease，不延后下一次主动探测，也不绕过失败重试退避。无前缀 Primary/Secondary 窗口仅在 `X-Codex-Active-Limit` 提供合法 limit 身份时摄取：`codex` 与 `premium` 映射到默认 account family，`codex_bengalfox` 映射到 Spark model family，其他合法身份保持为彼此隔离的 model family。active-limit 缺失或非法时只忽略无前缀窗口，明确分组的窗口仍可使用。同一 active family 也出现在明确分组中时，身份与周期相同的窗口合并为一项：额度值以无前缀观测为准，label 可由明确分组补充。同一 limit 周期重复出现的 Primary/Secondary 观测也会合并为一个窗口；已过期窗口不会参与新快照状态汇总。
 
-Home 同时为 Claude、Antigravity、Codex、Kimi、xAI 的 OAuth/file credential 运行固定目标主动 collector。Codex 读取官方 usage endpoint，使用 `metered_feature` 作为 additional limit 的稳定身份，并推导规范化套餐元数据。无论 usage 汇总是否包含 `rate_limit_reset_credits`，collector 都会独立查询 reset-credit 详情 endpoint。详情请求失败且 usage 汇总报告了正数当前次数时，collection 返回 `partial`，保存本次最新次数和空详情列表，不再沿用旧数量或已过期 credit；两个 endpoint 都没有提供可靠 reset-credit 信息时，会清除旧 reset-credit 数据，但不影响仍然可用的额度窗口。Codex `primary_windows` 会分别保留默认 account family 与 `codex_bengalfox` family 的一个代表窗口，并在每个 family 内优先最长周期（通常为 weekly），因此默认 5 小时窗口或 code-review limit 不会挤掉 Spark。使用位置型 `*-primary`/`*-secondary` ID 的 Codex v1 旧快照会在下一次满足活动门控的定时扫描中触发立即 v2 主动重采集，即使 freshness 或 `next_probe_at` 原本会推迟采集；升级尝试会在发起请求前记录，失败后恢复正常 retry backoff，不会持续绕过退避。旧 raw windows 仍保留用于诊断，但成功升级前 API 表现为 `unknown`/`stale`，升级失败后表现为 `error`/`stale`；v2 成功后原子替换旧 ID，后续被动 Header 观测也不能降低快照版本。Management API 不提供消费 reset credit 的操作。Claude 查询 usage 和 profile，额度成功但 profile 元数据失败时返回 `partial`。Antigravity 携带 credential `project_id` 请求分组额度汇总 endpoint，只将 `gemini-5h`、`gemini-weekly`、`3p-5h` 和 `3p-weekly` 映射到稳定的 `gemini` 与 `third-party` model scope。数字、数字字符串和百分数字符串形式的比例都可解析；disabled、未知或畸形 bucket 会被逐项忽略。只有两个 weekly bucket 都有效时，响应才可以替换最后已知快照；两个 5 小时 bucket 分别可选，不要求成对出现。`primary_windows` 每个稳定 scope 保留一个窗口，并在存在时优先该 scope 的 5 小时窗口。使用旧模型 ID 的 Antigravity v1 快照会在下一次满足活动门控的定时扫描中触发立即 v2 重采集；升级期间 API 返回 `unknown`/`stale`，失败后返回 `error`/`stale` 并遵循正常 retry backoff，成功后原子替换旧模型窗口。Kimi 查询 coding usage，保留账号 usage 汇总和每个 limit 窗口，并兼容数字或字符串形式的数值字段。Kimi 的 Provider limit 优先进入 `primary_windows`，避免聚合 summary 挤掉周限额或 duration 限额。xAI 使用 Grok CLI token-auth、client-version、user-agent 及可选 user-ID Header 请求 billing endpoint；支持 camelCase/snake_case 字段，以及 `{ "val": ... }`、数字或字符串 cents。`monthlyLimit=15000` 推导为 SuperGrok，`monthlyLimit=150000` 推导为 SuperGrok Heavy；正数 `onDemandCap` 配合显式或推导出的 `onDemandUsed` 生成 `xai-on-demand` 月度 USD 窗口，cap 缺失或为 0 表示未启用按量付费，不输出该窗口。无法使用这些 OAuth collector 的 Provider API-key credential 返回 `unsupported`。
+Home 同时为 Claude、Antigravity、Codex、Kimi、xAI 的 OAuth/file credential 运行固定目标主动 collector。Codex 读取官方 usage endpoint，使用 `metered_feature` 作为 additional limit 的稳定身份，并推导规范化套餐元数据。无论 usage 汇总是否包含 `rate_limit_reset_credits`，collector 都会独立查询 reset-credit 详情 endpoint。详情请求失败且 usage 汇总报告了正数当前次数时，collection 返回 `partial`，保存本次最新次数和空详情列表，不再沿用旧数量或已过期 credit；两个 endpoint 都没有提供可靠 reset-credit 信息时，会清除旧 reset-credit 数据，但不影响仍然可用的额度窗口。Codex `primary_windows` 会分别保留默认 account family 与 `codex_bengalfox` family 的一个代表窗口，并在每个 family 内优先最长周期（通常为 weekly），因此默认 5 小时窗口或 code-review limit 不会挤掉 Spark。使用位置型 `*-primary`/`*-secondary` ID 的 Codex v1 旧快照会在下一次满足活动门控的定时扫描中在凭证到期后触发一次 v2 主动重采集；升级尝试会在发起请求前记录，失败后恢复正常 retry backoff，不会持续绕过退避。旧 raw windows 仍保留用于诊断，但成功升级前 API 表现为 `unknown`/`stale`，升级失败后表现为 `error`/`stale`；v2 成功后原子替换旧 ID，后续被动 Header 观测也不能降低快照版本。Management API 不提供消费 reset credit 的操作。Claude 查询 usage 和 profile，额度成功但 profile 元数据失败时返回 `partial`。Antigravity 携带 credential `project_id` 请求分组额度汇总 endpoint，只将 `gemini-5h`、`gemini-weekly`、`3p-5h` 和 `3p-weekly` 映射到稳定的 `gemini` 与 `third-party` model scope。数字、数字字符串和百分数字符串形式的比例都可解析；disabled、未知或畸形 bucket 会被逐项忽略。只有两个 weekly bucket 都有效时，响应才可以替换最后已知快照；两个 5 小时 bucket 分别可选，不要求成对出现。`primary_windows` 每个稳定 scope 保留一个窗口，并在存在时优先该 scope 的 5 小时窗口。使用旧模型 ID 的 Antigravity v1 快照会在下一次满足活动门控的定时扫描中触发立即 v2 重采集；升级期间 API 返回 `unknown`/`stale`，失败后返回 `error`/`stale` 并遵循正常 retry backoff，成功后原子替换旧模型窗口。Kimi 查询 coding usage，保留账号 usage 汇总和每个 limit 窗口，并兼容数字或字符串形式的数值字段。Kimi 的 Provider limit 优先进入 `primary_windows`，避免聚合 summary 挤掉周限额或 duration 限额。xAI 使用 Grok CLI token-auth、client-version、user-agent 及可选 user-ID Header 请求 billing endpoint；支持 camelCase/snake_case 字段，以及 `{ "val": ... }`、数字或字符串 cents。`monthlyLimit=15000` 推导为 SuperGrok，`monthlyLimit=150000` 推导为 SuperGrok Heavy；正数 `onDemandCap` 配合显式或推导出的 `onDemandUsed` 生成 `xai-on-demand` 月度 USD 窗口，cap 缺失或为 0 表示未启用按量付费，不输出该窗口。无法使用这些 OAuth collector 的 Provider API-key credential 返回 `unsupported`。
 
-collector 直接读取 DB 凭证，不接受 HMC 提交 URL。探测前会重新解析最新 DB 凭证，并直接使用其中当前保存的 access token，不会调用 OAuth 刷新；凭证刷新仍由独立的 runtime 刷新子系统负责。全局代理使用热更新后的当前配置，凭证级代理仍优先。统一使用 20 秒 timeout、PostgreSQL 下每个 Provider 并发上限 3（SQLite 下全局为 1）、单凭证 DB 租约，以及从 5 分钟开始、带凭证级 jitter、约 1 小时封顶的指数退避；`Retry-After` 可延后下次尝试。禁用凭证以及因 OAuth 刷新失败而被阻断调度的凭证不会被主动探测；模型执行 cooldown 不会阻止额度采集，额度采集自身的重试退避（`next_probe_at`）会推迟定时扫描但不会阻断人工强制重采集。冷却过期或刷新阻断解除后，持久化的 unavailable/error 状态不再永久阻止恢复探测。成功快照默认 30 分钟有效。探测失败时保留最后已知窗口，只写结构化脱敏错误。
+collector 直接读取 DB 凭证，不接受 HMC 提交 URL。探测前会重新解析最新 DB 凭证，并直接使用其中当前保存的 access token，不会调用 OAuth 刷新；凭证刷新仍由独立的 runtime 刷新子系统负责。全局代理使用热更新后的当前配置，凭证级代理仍优先。统一使用 20 秒 timeout、单凭证 DB 租约，以及从 5 分钟开始、带凭证级 jitter、约 1 小时封顶的指数退避；`Retry-After` 可延后下次尝试。本构建中定时探测与按需探测通过同一个调度器节流，每个 Home 节点每个 15 秒槽位最多 claim 一次探测。禁用凭证以及因 OAuth 刷新失败而被阻断调度的凭证不会被主动探测；模型执行 cooldown 不会阻止额度采集，额度采集自身的重试退避（`next_probe_at`）会同时推迟定时采集和按需采集。冷却过期或刷新阻断解除后，持久化的 unavailable/error 状态不再永久阻止恢复探测。本构建中成功快照有效期为 1 分钟。由上游限流（`UPSTREAM_RATE_LIMITED`）导致的 `partial` 结果会保留窗口，但按失败退避安排下次探测并累加连续失败次数。探测失败时保留最后已知窗口，只写结构化脱敏错误。
 
 凭证核心字段：
 
@@ -2882,13 +2885,13 @@ collector 直接读取 DB 凭证，不接受 HMC 提交 URL。探测前会重新
 
 Provider 未报告该能力或没有可靠观测时，`reset_credits` 为 `null`。该字段只在详情响应中提供，不包含在 `GET /quota/credentials` 列表项里。`available_count` 是 Provider 最近一次报告的当前可用次数，`observed_at` 是该次 reset-credit 观测时间，`credits` 是经过数量限制并按过期时间排序的当前可用 Codex rate-limit reset credit 列表。usage 汇总提供正数次数、但独立详情请求失败时，`available_count` 保持本次最新值，`credits` 为空且 `collection_status=partial`；旧数量和已过期详情不会继续表现为当前数据。credit 条目只暴露状态和时间元数据，不返回 Provider 的 reset-credit 标识。该 endpoint 只读，不会消费 reset credit。
 
-定时额度 collector 每 1 分钟扫描一次。只有 Home 在最近 30 分钟内收到过该凭证的 usage，且这批 usage 晚于上次主动探测已消费的活动水位时，才会主动探测该凭证；恰好 30 分钟未使用视为不活跃。Home 使用精确接收时间记录活动。claim lease 时只捕获具备资格的活动水位，不立即消费；只有成功或失败的探测结果完成入库后才消费该水位，因此其他 Home 可以接管已放弃且过期的 lease，探测期间收到的新 usage 也会继续保持待处理。新的 usage 不会绕过 snapshot freshness、`next_probe_at`、已有 DB lease 或额度 retry backoff，只会让凭证在其他调度条件到期后具备下一次定时探测资格。活动水位属于内部 runtime 状态，不通过这些 API 暴露。
+定时额度 collector 每 15 秒扫描一次，每个 Home 节点每个 15 秒槽位最多 claim 一次探测。在快照已过期或 `next_probe_at` 已到达的凭证中，优先尝试最近一次尝试时间最早的凭证（从未尝试过的最先）；lease 竞争不会占用槽位。由于只 claim 已到期的凭证，上述快照版本升级同样要等到该到期时间。除非 `routing.strategy` 为 `quota-reset` 或设置了 `CLI_PROXY_QUOTA_MONITOR=1`，否则只有 Home 在最近 30 分钟内收到过该凭证的 usage，且这批 usage 晚于上次主动探测已消费的活动水位时，才会主动探测该凭证；恰好 30 分钟未使用视为不活跃。Home 使用精确接收时间记录活动。claim lease 时只捕获具备资格的活动水位，不立即消费；只有成功或失败的探测结果完成入库后才消费该水位，因此其他 Home 可以接管已放弃且过期的 lease，探测期间收到的新 usage 也会继续保持待处理。新的 usage 不会绕过 snapshot freshness、`next_probe_at`、已有 DB lease 或额度 retry backoff，只会让凭证在其他调度条件到期后具备下一次定时探测资格。活动水位属于内部 runtime 状态，不通过这些 API 暴露。
 
 usage 活动归属于通过 `auth_index` 解析出的当前 DB 凭证，因此委托 executor 上报的 Provider 不会阻止定时采集；Provider 专用的被动观测仍要求上报 Provider 与凭证 Provider 一致。定时扫描发现已过期的 `collecting` lease 且没有可恢复的近期活动水位时，会清除 lease 并把采集状态恢复为 `idle`，不会再次请求上游。
 
 ### POST `/quota/collect`
 
-启动一轮异步按需额度采集，返回进入本地 collector 队列的凭证数量。这是唯一非只读的额度端点。按需任务与定时采集共享进程级 Provider 并发限制；同一凭证在本地排队或执行期间会去重。
+启动一轮异步按需额度采集，返回进入本地 collector 队列的凭证数量。这是唯一非只读的额度端点。按需请求加入定时 collector 共享的 15 秒槽位队列；同一凭证在本地排队期间会去重。
 
 请求体(所有字段可选;空 body 采集全部符合条件的凭证):
 
@@ -2906,7 +2909,7 @@ usage 活动归属于通过 `auth_index` 解析出的当前 DB 凭证，因此�
 }
 ```
 
-`accepted` 统计本次新进入队列的符合条件凭证数。disabled、collector 不支持，以及已在本地排队/执行的凭证会跳过；执行 cooldown 既不会触发也不会阻止额度采集。定时 collector 仍要求近期存在未消费的新 usage，并遵循 snapshot freshness、`next_probe_at`、额度 retry backoff 和 DB probe lease，因此冷却后没有新请求的凭证不会持续定期采集。任务取得并发槽后会强制申请 DB probe lease：已有未过期 lease 仍优先，但定时 collector 的活动与调度门控不会阻止这次人工请求。采集只更新额度快照，不会清除执行 cooldown。采集在后台运行；完成后通过 `GET /quota/credentials` 读取更新快照。运行时未接入 quota collector 时，该路由返回 `404`（`QUOTA_RECOLLECT_UNSUPPORTED`），且 `capabilities.quota_recollect` 为 `false`。
+`accepted` 统计本次新进入队列的符合条件凭证数。disabled、collector 不支持，以及已在本地排队/执行的凭证会跳过；执行 cooldown 既不会触发也不会阻止额度采集。快照仍有效或 `next_probe_at` 重试退避尚未结束的凭证也会跳过，不计入 `accepted`。被接受的凭证在之后的调度槽位中按最早尝试优先探测；claim 时只绕过近期 usage 活动门控，仍遵循 snapshot freshness、`next_probe_at` 和已有 DB lease。轮到槽位时已不再符合条件或尚未到期的排队凭证会被移出队列且不探测。`running: true` 表示至少有一个凭证已排队，并不表示探测已开始。除非启用 `quota-reset` 或设置了 `CLI_PROXY_QUOTA_MONITOR=1`，定时 collector 本身仍要求近期存在未消费的新 usage，因此冷却后没有新请求的凭证不会持续定期采集。采集只更新额度快照，不会清除执行 cooldown。采集在后台运行；完成后通过 `GET /quota/credentials` 读取更新快照。运行时未接入 quota collector 时，该路由返回 `404`（`QUOTA_RECOLLECT_UNSUPPORTED`），且 `capabilities.quota_recollect` 为 `false`。
 
 
 额度端点校验错误格式：
@@ -3951,8 +3954,8 @@ Query 参数：
 | `quota-exceeded.switch-project` | boolean | Gemini quota error 时切换 project。 |
 | `quota-exceeded.switch-preview-model` | boolean | Quota error 时切换到 preview model。 |
 | `oauth.providers.antigravity.antigravity-credits` | boolean | Claude 最后兜底使用 Antigravity credits。 |
-| `routing.strategy` | string | `round-robin`、`weighted-round-robin` 或 `fill-first`。 |
-| `routing.session-affinity` | boolean | 通用 session-sticky credential routing。 |
+| `routing.strategy` | string | `round-robin`、`weighted-round-robin`、`fill-first` 或 `quota-reset`。 |
+| `routing.session-affinity` | boolean | 通用 session-sticky credential routing；`quota-reset` 不使用此设置。 |
 | `routing.session-affinity-ttl` | string | Session-to-auth binding 持续时间。 |
 | `oauth.providers.antigravity.signature-cache-enabled` | boolean pointer | 启用 Antigravity thinking signature cache validation。 |
 | `oauth.providers.antigravity.signature-bypass-strict` | boolean pointer | 控制 Antigravity signature bypass 严格程度。 |
@@ -4247,8 +4250,8 @@ v0 的 `/v0/management/gemini-api-key`、`/v0/management/interactions-api-key`�
 | `PUT/PATCH` | `/v0/management/max-retry-interval` | `{ "value": number }` | `{ "status": "ok" }` |
 | `GET` | `/v0/management/force-model-prefix` | 无 | `{ "force-model-prefix": boolean }` |
 | `PUT/PATCH` | `/v0/management/force-model-prefix` | `{ "value": boolean }` | `{ "status": "ok" }` |
-| `GET` | `/v0/management/routing/strategy` | 无 | `{ "strategy": "round-robin" }` 或 `{ "strategy": "fill-first" }` |
-| `PUT/PATCH` | `/v0/management/routing/strategy` | `{ "value": "round-robin" }`、`roundrobin`、`rr`、`fill-first`、`fillfirst`、`ff` | `{ "status": "ok" }` |
+| `GET` | `/v0/management/routing/strategy` | 无 | `{ "strategy": string }`：`round-robin`、`weighted-round-robin`、`fill-first` 或 `quota-reset` |
+| `PUT/PATCH` | `/v0/management/routing/strategy` | `{ "value": "round-robin" }`、`roundrobin`、`rr`、`weighted-round-robin`、`weightedroundrobin`、`wrr`、`fill-first`、`fillfirst`、`ff`、`quota-reset` | `{ "status": "ok" }` |
 | `GET` | `/v0/management/quota-exceeded/switch-project` | 无 | `{ "switch-project": boolean }` |
 | `PUT/PATCH` | `/v0/management/quota-exceeded/switch-project` | `{ "value": boolean }` | `{ "status": "ok" }` |
 | `GET` | `/v0/management/quota-exceeded/switch-preview-model` | 无 | `{ "switch-preview-model": boolean }` |
@@ -4570,3 +4573,65 @@ DELETE query：
 | `provider` | string | 条件必填 | `channel` 的 alias。 |
 
 写入成功返回 `{ "status": "ok" }`。
+
+
+## 本地路由优先级观测
+
+`GET /v8/management/quota/routing`（兼容 `/v0/management/quota/routing`）需要管理认证，
+返回 `Cache-Control: no-store`。响应包含当前运行配置的 `strategy`、`strategy_name`、
+`order_kind`（`rank`/`tier`/`unknown`）、有效 `session_affinity`、`generated_at` 和 `accounts`。
+账户字段为 `credential_id`、可为空的 `rank`、`reason`、`priority`、`weight`、
+可选 `weekly_reset_at`、`model_dependent` 和可选 `estimated`，不包含令牌或密钥。运行时不可用时返回 503。
+
+`quota-reset` 与实际调度共享基于上游观测的排序函数。观测不会修改调度状态或请求上游。
+新鲜的五小时窗口只有在剩余量恰好为 100% 且没有重置计时器时才优先启动。上游报告
+计时器已启动或剩余量低于 100% 后，账户按每周重置时间排序；成功请求本身不会改变
+排名，因为缓存响应可能不消耗配额。健康或低余额的历史快照即使过期，仍可用未来的
+每周重置时间参与排序，并标记为估计值。健康的过期 100%/无计时器快照在每周重置
+时间尚未过去时也保持启动优先级，并标记为估计值。仅账户级窗口决定耗尽状态，模型奖励池不影响
+账户排序。已过去的五小时窗口不会使仍有效的每周计时器失效；不会凭空延长已过去的
+重置时间。未知、错误、没有观测或观测时间在未来的快照仍作为兜底候选。
+轮询策略展示同优先级层次，带权轮询展示权重，不声称固定的下一请求顺序。禁用或刷新阻塞
+账户不参与排名；模型冷却在未指定模型时标为条件限制。排名是请求模型、提供商、分组、
+会话粘性和并发限制前的全局候选优先级；分组过滤仅改变可见账户，不重新编号。
+
+Home 的系统配置现在支持 `round-robin`、`fill-first`、`weighted-round-robin` 和
+`quota-reset`，通过原有路由策略配置接口持久化并热更新。配额页每 60 秒刷新排名和值，
+仅显示已选策略名称，不显示策略说明文字。
+
+启用 `quota-reset` 策略或设置 `CLI_PROXY_QUOTA_MONITOR=1` 时，collector 也会检查空闲账户，
+而不只是近期有 usage 的账户。探测在每个 Home 节点上按每个 15 秒槽位一次节流，因此 N 个
+到期账户完成一轮约需 N×15 秒。仍遵循禁用凭证、probe lease、`next_probe_at` 和 Provider
+失败退避。本构建中成功快照有效期为 1 分钟。按需采集仍为异步，并使用同一节流队列。
+
+`/management.html#/admin/quota` 在 Home Center 内提供额度页面，旧的 `/quota-dashboard.html`
+书签会重定向到该页面。页面使用现有管理密钥及现有额度快照/详情接口进行认证请求；可见时
+每 60 秒轮询一次，返回页面时立即刷新，出错时保留最后一次成功的观测。页面与凭证管理分开
+显示凭证显示名、剩余额度和重置时间。
+
+
+### GET `/quota/users`（本地扩展）
+
+需要现有管理认证，返回 `{ "users": [{ "id": 1, "username": "example", "key_count": 2,
+"credential_ids": ["credential-id"] }] }`。不返回 API 密钥值、密码字段或用户计费信息。
+`credential_ids` 是该用户所有有效 API 密钥可访问凭据的并集：不受限的密钥包含全部当前凭据；
+受限密钥解析已启用的凭据范围。模型级凭据范围先与密钥的凭据范围取交集，再在允许的模型间
+取并集。已禁用/已删除的范围及已删除的密钥不授予访问权限。没有密钥的用户返回空列表；
+未绑定用户的密钥不属于任何用户。这是配置层面的范围访问，与临时计费、账户禁用状态、冷却
+或 Provider/模型可用性无关；这些状态仍决定实际调度，并在仪表盘中单独显示。
+
+
+### GET `/quota/recent-usage`（本地扩展）
+
+需要管理认证，支持 `/v8/management` 和 `/v0/management`，返回
+`Cache-Control: no-store`。响应包含服务器时间 `generated_at` 和 `accounts`，
+每项含 `credential_id` 以及 `five_minutes`、`hour`、`day` 三个对象，
+各有 `tokens` 和 `requests`。窗口为最近 5 分钟、1 小时、24 小时，
+包含起止边界，排除未来记录。所有未删除凭据均返回，包括禁用凭据；没有记录时为零。
+
+数据来自 Home 已记录的完成请求（包括失败尝试），不含其他工具的流量或正在进行的请求，
+也不代表订阅配额百分比。令牌总量复用规范化统计及旧记录的供应商兼容计算，
+避免重复计算缓存和推理令牌。新记录采用写入时的凭据 UUID，旧记录按 UUID、
+索引、ID 顺序解析；重复别名按 UUID 排序确定归属。已删除或未知的新记录 UUID
+不会通过复用别名重新归属。响应不包含 API 密钥、OAuth 令牌或原始请求数据。
+可见历史取决于现有记录采集和保留设置，不访问上游，不改变路由或使用限额。

@@ -221,6 +221,9 @@ The following v8 routes are derived from `internal/managementhttp/routes_v8.go` 
 | `PATCH` | `/proxy/proxy-pools/:id` |
 | `POST` | `/proxy/proxy-pools/:id/test` |
 | `POST` | `/quota/collect` |
+| `GET` | `/quota/users` (local extension) |
+| `GET` | `/quota/recent-usage` (local extension) |
+| `GET` | `/quota/routing` (local extension) |
 | `GET` | `/quota/credentials` |
 | `GET` | `/quota/credentials/:credential_id` |
 | `GET` | `/request-events` |
@@ -2457,7 +2460,7 @@ Home first tries the matching plugin. A handled plugin fetch returns `200` with 
 { "accepted": 1, "running": true, "credential_id": "credential-uuid" }
 ```
 
-`accepted` can be `0`; `running` is exactly `accepted > 0`, not a global collector-status probe. Poll `/quota/credentials/:credential_id` for the persisted snapshot after an asynchronous collection. An explicit plugin selection does not suppress this built-in fallback if the plugin leaves the request unhandled.
+`accepted` can be `0`; `running` is exactly `accepted > 0`, not a global collector-status probe. Built-in collection follows the same scheduling rules as `POST /quota/collect`, so `accepted` is `0` while the snapshot is still fresh or in retry backoff. Poll `/quota/credentials/:credential_id` for the persisted snapshot after an asynchronous collection. An explicit plugin selection does not suppress this built-in fallback if the plugin leaves the request unhandled.
 
 Synchronous plugin response example:
 
@@ -2724,9 +2727,9 @@ All timestamps are RFC3339 UTC values or `null`. Ratios are numbers in `[0,1]`. 
 
 Current passive collection extracts a bounded `quota_headers` object from the CPA usage event `response_headers`. Home preserves only the Codex `X-Codex-*` quota allowlist plus a syntax-validated, non-secret-like upstream request ID, and removes the raw `response_headers` object before writing the usage payload. Before the core transaction starts, the reported `auth_index` is resolved concurrently against the active auth UUID, runtime index, and ID; the usage row stores the stable UUID, normalized provider/type identity, and quota-identity generation, so a concurrent delete or identity change fences the row from the replacement credential without serializing usage ingestion. After the core usage/billing transaction commits, Codex Header observations are normalized and upserted in an isolated quota transaction; invalid quota metadata or quota persistence failures cannot roll back the core usage or billing write. Timestamps more than five minutes ahead of Home's receive time are normalized to the receive time. Older observations cannot replace a newer snapshot or window, including concurrent first writes. Codex Header observations are always treated as sparse rolling updates: they merge by stable limit identity and period, retain still-valid windows and metadata learned by the authoritative active probe, do not clear an in-flight probe lease, and do not postpone the next active probe or bypass its retry backoff. Unprefixed Primary/Secondary windows are accepted only when `X-Codex-Active-Limit` contains a valid limit identity: `codex` and `premium` map to the default account family, `codex_bengalfox` maps to the Spark model family, and other valid identities remain isolated model families. Missing or invalid active-limit metadata causes only the unprefixed windows to be ignored; explicitly grouped windows remain usable. If the active family is also present as an explicit group, matching identity-and-period windows collapse to one entry, the unprefixed observation supplies the quota values, and the explicit group may supply its label. Repeated Primary/Secondary observations for the same limit period also collapse to one window. Expired windows cannot make a new snapshot appear healthy or exhausted.
 
-Home also runs fixed-target active collectors for Claude, Antigravity, Codex, Kimi, and xAI OAuth/file credentials. Codex reads the official usage endpoint, uses `metered_feature` as the stable identity for additional limits, and derives normalized plan metadata. It queries the reset-credit detail endpoint independently of whether the usage summary contains `rate_limit_reset_credits`. If that detail request fails while the usage summary reports a positive current count, the collection is `partial` and stores the latest count with an empty detail list instead of carrying forward older quantities or expired credits. If neither endpoint provides reliable reset-credit information, older reset-credit data is cleared without degrading otherwise usable quota windows. Codex `primary_windows` keeps one representative from the default account family and one from `codex_bengalfox`, preferring the longest (normally weekly) window in each family, so the default 5-hour window or code-review limits cannot hide Spark. At the next activity-eligible scheduled scan, existing Codex v1 snapshots that use positional `*-primary`/`*-secondary` IDs trigger one immediate v2 active recollection even when freshness or `next_probe_at` would normally defer it. The upgrade attempt is recorded before the request, so a failure returns to the normal retry backoff instead of bypassing it repeatedly. Legacy raw windows remain stored for diagnosis, but the API reports them as `unknown`/`stale` before a successful upgrade and `error`/`stale` after a failed upgrade; a successful v2 probe atomically replaces the old IDs, and later passive Header observations cannot downgrade the snapshot version. No reset-credit consume operation is exposed through the Management API. Claude reads usage and profile, reporting `partial` when quota succeeds but profile metadata fails. Antigravity calls the grouped quota-summary endpoint with the credential `project_id` and maps only `gemini-5h`, `gemini-weekly`, `3p-5h`, and `3p-weekly` into stable `gemini` and `third-party` model scopes. Numeric fractions, numeric strings, and percentage strings are accepted; disabled, unknown, or malformed buckets are omitted independently. Both weekly buckets are required before a response can replace the last-known snapshot, while either 5-hour bucket remains independently optional. Primary selection keeps one window per stable scope and prefers that scope's 5-hour bucket when present. At the next activity-eligible scheduled scan, existing model-ID Antigravity v1 snapshots trigger an immediate v2 recollection; they are reported as `unknown`/`stale` while upgrade is pending and `error`/`stale` after a failed upgrade, with normal retry backoff. A successful v2 probe atomically replaces the legacy model windows. Kimi reads coding usage and preserves both the account usage summary and each returned limit window while accepting numeric fields encoded as numbers or strings. Kimi provider limits take primary-window priority over its aggregate summary so weekly and duration limits remain visible in list views. xAI calls the Grok CLI billing endpoint with the CLI token-auth, client-version, user-agent, and optional user-ID headers. It accepts camelCase or snake_case billing fields and `{ "val": ... }`, numeric, or string cent values. `monthlyLimit=15000` maps to SuperGrok and `monthlyLimit=150000` maps to SuperGrok Heavy. Positive `onDemandCap` plus explicit or derived `onDemandUsed` values produce the `xai-on-demand` monthly USD window; a missing or zero cap means pay-as-you-go is disabled and no such window is emitted. Provider API-key credentials that cannot use these OAuth collectors are returned as `unsupported`.
+Home also runs fixed-target active collectors for Claude, Antigravity, Codex, Kimi, and xAI OAuth/file credentials. Codex reads the official usage endpoint, uses `metered_feature` as the stable identity for additional limits, and derives normalized plan metadata. It queries the reset-credit detail endpoint independently of whether the usage summary contains `rate_limit_reset_credits`. If that detail request fails while the usage summary reports a positive current count, the collection is `partial` and stores the latest count with an empty detail list instead of carrying forward older quantities or expired credits. If neither endpoint provides reliable reset-credit information, older reset-credit data is cleared without degrading otherwise usable quota windows. Codex `primary_windows` keeps one representative from the default account family and one from `codex_bengalfox`, preferring the longest (normally weekly) window in each family, so the default 5-hour window or code-review limits cannot hide Spark. At the next activity-eligible scheduled scan, existing Codex v1 snapshots that use positional `*-primary`/`*-secondary` IDs trigger one v2 active recollection once the credential is due. The upgrade attempt is recorded before the request, so a failure returns to the normal retry backoff instead of bypassing it repeatedly. Legacy raw windows remain stored for diagnosis, but the API reports them as `unknown`/`stale` before a successful upgrade and `error`/`stale` after a failed upgrade; a successful v2 probe atomically replaces the old IDs, and later passive Header observations cannot downgrade the snapshot version. No reset-credit consume operation is exposed through the Management API. Claude reads usage and profile, reporting `partial` when quota succeeds but profile metadata fails. Antigravity calls the grouped quota-summary endpoint with the credential `project_id` and maps only `gemini-5h`, `gemini-weekly`, `3p-5h`, and `3p-weekly` into stable `gemini` and `third-party` model scopes. Numeric fractions, numeric strings, and percentage strings are accepted; disabled, unknown, or malformed buckets are omitted independently. Both weekly buckets are required before a response can replace the last-known snapshot, while either 5-hour bucket remains independently optional. Primary selection keeps one window per stable scope and prefers that scope's 5-hour bucket when present. At the next activity-eligible scheduled scan, existing model-ID Antigravity v1 snapshots trigger an immediate v2 recollection; they are reported as `unknown`/`stale` while upgrade is pending and `error`/`stale` after a failed upgrade, with normal retry backoff. A successful v2 probe atomically replaces the legacy model windows. Kimi reads coding usage and preserves both the account usage summary and each returned limit window while accepting numeric fields encoded as numbers or strings. Kimi provider limits take primary-window priority over its aggregate summary so weekly and duration limits remain visible in list views. xAI calls the Grok CLI billing endpoint with the CLI token-auth, client-version, user-agent, and optional user-ID headers. It accepts camelCase or snake_case billing fields and `{ "val": ... }`, numeric, or string cent values. `monthlyLimit=15000` maps to SuperGrok and `monthlyLimit=150000` maps to SuperGrok Heavy. Positive `onDemandCap` plus explicit or derived `onDemandUsed` values produce the `xai-on-demand` monthly USD window; a missing or zero cap means pay-as-you-go is disabled and no such window is emitted. Provider API-key credentials that cannot use these OAuth collectors are returned as `unsupported`.
 
-Collectors read DB credentials directly and never accept a URL from HMC. Before probing, they resolve the latest DB credential and use its currently stored access token without invoking OAuth refresh; credential refresh remains owned by the independent runtime refresh subsystem. They use the current hot-reloaded global proxy unless the credential has its own proxy. They use a 20-second request timeout, a per-provider concurrency limit of 3 on PostgreSQL and a global limit of 1 on SQLite, a per-credential DB lease, and a five-minute exponential retry backoff with per-credential jitter capped near one hour. `Retry-After` can extend the next attempt. Disabled credentials and credentials blocked by an OAuth refresh failure are not actively probed; model execution cooldowns do not prevent quota collection, and quota collection's own retry backoff (`next_probe_at`) defers scheduled scans without blocking on-demand force recollection. Persisted unavailable/error state from an expired cooldown or cleared refresh block no longer blocks recovery. Successful snapshots are fresh for 30 minutes. Failures preserve last-known windows and store only structured, redacted error metadata.
+Collectors read DB credentials directly and never accept a URL from HMC. Before probing, they resolve the latest DB credential and use its currently stored access token without invoking OAuth refresh; credential refresh remains owned by the independent runtime refresh subsystem. They use the current hot-reloaded global proxy unless the credential has its own proxy. They use a 20-second request timeout, a per-credential DB lease, and a five-minute exponential retry backoff with per-credential jitter capped near one hour. `Retry-After` can extend the next attempt. In this build, scheduled and on-demand probes are paced through one shared scheduler that claims at most one probe per 15-second slot on each Home node. Disabled credentials and credentials blocked by an OAuth refresh failure are not actively probed; model execution cooldowns do not prevent quota collection, and quota collection's own retry backoff (`next_probe_at`) defers both scheduled and on-demand collection. Persisted unavailable/error state from an expired cooldown or cleared refresh block no longer blocks recovery. Successful snapshots are fresh for one minute in this build. A `partial` result caused by an upstream rate limit (`UPSTREAM_RATE_LIMITED`) keeps its windows but schedules the next probe with the failure backoff and increments the consecutive-failure count. Failures preserve last-known windows and store only structured, redacted error metadata.
 
 Credential fields:
 
@@ -2884,13 +2887,13 @@ Returns the same credential core object, every current window in stable order, o
 
 `reset_credits` is `null` when the provider does not report this capability or no reliable observation is available. It is detail-only and is not included in `GET /quota/credentials` list items. `available_count` is the latest provider-reported number of currently available credits, `observed_at` is the time of that reset-credit observation, and `credits` contains the bounded, expiry-sorted list of currently available Codex rate-limit reset credits. When the usage summary supplies a positive count but the independent detail request fails, `available_count` remains current while `credits` is empty and `collection_status=partial`; older quantities and expired detail rows are not presented as current. Credit entries expose only status and timing metadata; provider reset-credit identifiers are not returned. This endpoint is read-only and does not consume a credit.
 
-The scheduled quota collector scans once per minute. A credential is probed only when Home received usage for it during the previous 30 minutes and that usage is newer than the activity consumed by its last active probe. Exactly 30 minutes without usage is considered inactive. Home records activity at its exact receive time. A lease claim captures but does not consume the eligible activity watermark; the watermark is consumed only when a successful or failed probe result is persisted, so another Home can reclaim an abandoned expired lease while usage received during the probe remains pending. New usage does not bypass snapshot freshness, `next_probe_at`, an active DB lease, or quota retry backoff; it only makes the credential eligible for the next otherwise-due scheduled probe. Activity watermarks are internal runtime state and are not exposed by these APIs.
+The scheduled quota collector scans every 15 seconds and claims at most one probe per 15-second slot on each Home node. Among credentials whose snapshot has expired or whose `next_probe_at` has passed, it tries the least recently attempted credential first (never-attempted credentials first); lease contention does not consume the slot. Because only due credentials are claimed, the snapshot-version upgrades described above also wait for that due time. Unless `routing.strategy` is `quota-reset` or `CLI_PROXY_QUOTA_MONITOR=1` is set, a credential is probed only when Home received usage for it during the previous 30 minutes and that usage is newer than the activity consumed by its last active probe. Exactly 30 minutes without usage is considered inactive. Home records activity at its exact receive time. A lease claim captures but does not consume the eligible activity watermark; the watermark is consumed only when a successful or failed probe result is persisted, so another Home can reclaim an abandoned expired lease while usage received during the probe remains pending. New usage does not bypass snapshot freshness, `next_probe_at`, an active DB lease, or quota retry backoff; it only makes the credential eligible for the next otherwise-due scheduled probe. Activity watermarks are internal runtime state and are not exposed by these APIs.
 
 Usage activity is attributed to the active DB credential resolved from `auth_index`, so a delegated executor's reported provider does not suppress scheduled collection; provider-specific passive observations still require the reported provider to match the credential provider. When a scheduled scan finds an expired `collecting` lease without a recoverable recent-activity watermark, it clears the lease and returns the collection to `idle` without issuing another upstream request.
 
 ### POST `/quota/collect`
 
-Starts an asynchronous on-demand quota collection round and returns how many credentials were accepted into the local collector queue. This is the only quota endpoint that is not read-only. On-demand jobs share the same process-wide provider concurrency controls as scheduled collection and are deduplicated per credential while queued or running.
+Starts an asynchronous on-demand quota collection round and returns how many credentials were accepted into the local collector queue. This is the only quota endpoint that is not read-only. On-demand requests join the scheduled collector's shared 15-second slot queue and are deduplicated per credential while queued.
 
 Request body (all fields optional; an empty body collects every eligible credential):
 
@@ -2908,7 +2911,7 @@ Response `202`:
 }
 ```
 
-`accepted` counts eligible credentials newly queued by this request. Disabled, collector-unsupported, and already queued/running local credentials are skipped; an execution cooldown neither triggers nor blocks quota collection. The scheduled collector still requires recent unconsumed usage and honors snapshot freshness, `next_probe_at`, quota retry backoff, and the DB probe lease, so a cooling credential with no new requests is not probed continuously. When a queued job reaches a concurrency slot it force-claims the DB probe lease: an active lease is still respected, but the scheduled collector's activity and scheduling gates do not suppress the requested attempt. Collection only updates the quota snapshot and does not clear the execution cooldown. The collection round runs in the background; read updated snapshots through `GET /quota/credentials` after it finishes. When the runtime has no quota collector wired, the route returns `404` with `QUOTA_RECOLLECT_UNSUPPORTED` and `capabilities.quota_recollect` is `false`.
+`accepted` counts eligible credentials newly queued by this request. Disabled, collector-unsupported, and already queued/running local credentials are skipped; an execution cooldown neither triggers nor blocks quota collection. Credentials whose snapshot is still fresh or whose `next_probe_at` retry backoff has not elapsed are also skipped and do not count toward `accepted`. Accepted credentials are probed in later scheduler slots, oldest attempt first; at claim time they bypass only the recent-usage activity gate and still honor snapshot freshness, `next_probe_at`, and an active DB lease. A queued credential that is no longer eligible or due when its slot arrives is dropped without a probe. `running: true` means at least one credential was queued, not that a probe has started. Unless `quota-reset` or `CLI_PROXY_QUOTA_MONITOR=1` is active, the scheduled collector itself still requires recent unconsumed usage, so a cooling credential with no new requests is not probed continuously. Collection only updates the quota snapshot and does not clear the execution cooldown. The collection round runs in the background; read updated snapshots through `GET /quota/credentials` after it finishes. When the runtime has no quota collector wired, the route returns `404` with `QUOTA_RECOLLECT_UNSUPPORTED` and `capabilities.quota_recollect` is `false`.
 
 
 Quota endpoint validation errors use:
@@ -3953,8 +3956,8 @@ The following paths use the v8 config layout. `/config` and `/config.yaml` suppo
 | `quota-exceeded.switch-project` | boolean | Switches Gemini project on quota errors. |
 | `quota-exceeded.switch-preview-model` | boolean | Switches to preview model on quota errors. |
 | `oauth.providers.antigravity.antigravity-credits` | boolean | Uses Antigravity credits as last-resort Claude fallback. |
-| `routing.strategy` | string | `round-robin`, `weighted-round-robin`, or `fill-first`. |
-| `routing.session-affinity` | boolean | Universal session-sticky credential routing. |
+| `routing.strategy` | string | `round-robin`, `weighted-round-robin`, `fill-first`, or `quota-reset`. See the quota-reset extension below. |
+| `routing.session-affinity` | boolean | Universal session-sticky credential routing; ignored by `quota-reset`. |
 | `routing.session-affinity-ttl` | string | Session-to-auth binding duration. |
 | `oauth.providers.antigravity.signature-cache-enabled` | boolean pointer | Enables Antigravity thinking signature cache validation. |
 | `oauth.providers.antigravity.signature-bypass-strict` | boolean pointer | Controls strictness of Antigravity signature bypass. |
@@ -4249,8 +4252,8 @@ Port changes require a CPA restart: `PUT/PATCH /v0/management/port` persists and
 | `PUT/PATCH` | `/v0/management/max-retry-interval` | `{ "value": number }` | `{ "status": "ok" }` |
 | `GET` | `/v0/management/force-model-prefix` | none | `{ "force-model-prefix": boolean }` |
 | `PUT/PATCH` | `/v0/management/force-model-prefix` | `{ "value": boolean }` | `{ "status": "ok" }` |
-| `GET` | `/v0/management/routing/strategy` | none | `{ "strategy": "round-robin" }` or `{ "strategy": "fill-first" }` |
-| `PUT/PATCH` | `/v0/management/routing/strategy` | `{ "value": "round-robin" }`, `roundrobin`, `rr`, `weighted-round-robin`, `weightedroundrobin`, `wrr`, `fill-first`, `fillfirst`, or `ff` | `{ "status": "ok" }` |
+| `GET` | `/v0/management/routing/strategy` | none | `{ "strategy": string }`: `round-robin`, `weighted-round-robin`, `fill-first`, or `quota-reset` |
+| `PUT/PATCH` | `/v0/management/routing/strategy` | `{ "value": "round-robin" }`, `roundrobin`, `rr`, `weighted-round-robin`, `weightedroundrobin`, `wrr`, `fill-first`, `fillfirst`, `ff`, or `quota-reset` | `{ "status": "ok" }` |
 | `GET` | `/v0/management/quota-exceeded/switch-project` | none | `{ "switch-project": boolean }` |
 | `PUT/PATCH` | `/v0/management/quota-exceeded/switch-project` | `{ "value": boolean }` | `{ "status": "ok" }` |
 | `GET` | `/v0/management/quota-exceeded/switch-preview-model` | none | `{ "switch-preview-model": boolean }` |
@@ -4573,3 +4576,126 @@ DELETE query:
 | `provider` | string | conditionally | Alias of `channel`. |
 
 Successful writes return `{ "status": "ok" }`.
+
+
+## Local quota-reset routing extension
+
+This deployment supports `routing.strategy: quota-reset` through
+`PUT /v8/management/config/routing/strategy` with the JSON string `"quota-reset"`.
+It ignores static credential priorities and session affinity for this strategy.
+After the existing model, channel-group, availability, cooling, and concurrency
+filters, selection favors a usable account-wide five-hour window with exactly
+100% capacity remaining and no reported reset timer. Ties use the earliest
+account-wide weekly reset. The account remains at untouched priority until a
+provider observation reports a running five-hour timer or consumption below
+100%. A running timer returns it to weekly ordering even if capacity still
+rounds to 100%. A successful request alone does not prove the timer started:
+cached or zero-consumption requests do not change this ranking.
+Other strategies retain their existing behavior.
+
+Only account-scoped five-hour and seven-day windows affect ranking. Healthy/low
+last-known observations remain usable after a quota probe fails or becomes stale:
+a still-future weekly reset participates in ordering and is labeled estimated.
+Exhaustion is evaluated on account windows; an exhausted model-specific bonus
+pool does not change account ordering. Elapsed window capacity is discarded,
+and an elapsed five-hour reset does not discard a still-future weekly reset.
+A healthy stale 100%/no-timer report also retains untouched priority as an estimate,
+bounded by its still-future weekly reset. Without that boundary it cannot prove
+untouched capacity. Unknown, errored,
+unobserved, or future-dated snapshots remain fallback candidates. No reset
+boundaries are invented after their recorded deadlines pass. Known exhausted
+account windows rank last; normal upstream errors and cooldown handling remain
+authoritative. No new proxy consumption caps are imposed.
+
+When this strategy is enabled or `CLI_PROXY_QUOTA_MONITOR=1` is set, the collector also
+checks idle accounts, not only accounts with recent usage. Probes are paced at one per
+15-second slot on each Home node, so a full round over N due accounts takes about
+N×15 seconds. It honors disabled credentials, probe leases, `next_probe_at`, and
+provider failure backoff. Successful snapshots have a one-minute freshness interval in
+this build. On-demand collection remains asynchronous and uses the same paced queue.
+
+`/management.html#/admin/quota` serves the quota page within Home Center. Old
+`/quota-dashboard.html` bookmarks redirect there. Its authenticated
+API calls use the existing management key and existing quota snapshot/detail
+endpoints. It polls every 60 seconds while visible, refreshes immediately on return,
+and retains the last successful observation on errors. It shows credential display
+names, remaining quota, and reset times separately from auth management.
+
+
+### Live routing priority observation
+
+`GET /v8/management/quota/routing` (also `/v0/management/quota/routing`) uses normal
+management authentication and returns `Cache-Control: no-store`. It reports the
+live runtime's `strategy`, `strategy_name`, `order_kind` (`rank`, `tier`, or
+`unknown`), effective `session_affinity`, `generated_at`, and `accounts`.
+Each account contains `credential_id`, nullable `rank`, `reason`, configured
+`priority`, `weight`, optional `weekly_reset_at`, `model_dependent`, and optional `estimated`.
+No credential secrets or OAuth material are returned. Missing runtime returns 503.
+
+Quota reset priority uses the same provider-observation ranking function as
+dispatch. The read does not advance rotation cursors, modify runtime state, or
+contact providers. Fill-first reports static priority followed by ID
+order. Round-robin variants report tied static-priority tiers; weighted rotation
+also exposes the configured weight and excludes zero weights. Disabled/refresh-
+blocked credentials have null rank. Model-specific cooldowns are conditional when
+there is no requested model and do not globally remove an otherwise usable account.
+
+Ranks describe global candidate priority before request-specific provider, model,
+access-group, session-affinity, retry and concurrency filtering. They are not a
+promise about which credential will handle the next request. The Quotas UI's group
+filter only changes visibility and preserves original ranks and values. Rank gaps
+are intentional. The page refreshes these observations every 60 seconds alongside
+quota snapshots and displays the selected strategy name without policy prose.
+
+Native Home System Config supports `round-robin`, `fill-first`,
+`weighted-round-robin`, and `quota-reset`. It saves through the existing
+`PUT /v0/management/routing/strategy` (`{"value":"quota-reset"}`) endpoint; v8
+clients can use the existing scalar config endpoint documented above. Switching
+strategies is a persisted configuration change and hot-reloads the scheduler.
+
+### GET `/quota/users` (local extension)
+
+Returns `{ "users": [{ "id": 1, "username": "example", "key_count": 2,
+"credential_ids": ["credential-id"] }] }` under existing management authentication.
+No API key values, password fields, or user billing information are returned.
+Credential IDs are the union across a user's active API keys: unrestricted keys
+include all current credentials; scoped keys resolve enabled credential scopes.
+Model-specific credential scopes intersect the key's credential scopes before
+unioning across allowed models. Disabled/deleted scopes and deleted keys grant
+no access. Users without keys have an empty credential list. Unbound keys belong
+to no user. This is configured scope access, independent of temporary billing,
+account-disabled status, cooldowns or provider/model availability. These states
+still govern actual dispatch and are shown separately on the dashboard.
+
+
+### GET `/quota/recent-usage` (local extension)
+
+Authenticated management read (both `/v8/management` and `/v0/management`).
+Returns `Cache-Control: no-store` and a server timestamp with account summaries:
+
+```json
+{
+  "generated_at": "2026-10-08T20:00:00Z",
+  "accounts": [{
+    "credential_id": "credential-id",
+    "five_minutes": { "tokens": 12345, "requests": 3 },
+    "hour": { "tokens": 90000, "requests": 21 },
+    "day": { "tokens": 500000, "requests": 111 }
+  }]
+}
+```
+
+Windows are rolling 5 minutes, 1 hour, and 24 hours, inclusive from the cutoff
+through `generated_at`. Future records are excluded. Each current, nondeleted
+credential is included, even when disabled or without traffic (zero totals).
+These are completed requests recorded by Home, including failed attempts; usage
+from other tools and in-flight requests is absent. They do not measure the
+provider's subscription quota percentage. Totals reuse Home's canonical token
+accounting, including provider-specific legacy fallback when needed, without
+summing overlapping reasoning/cache fields again. Current usage records use
+UUID attribution captured at ingestion; legacy records resolve UUID, then auth
+index, then ID, choosing the first UUID in sorted order for duplicate aliases.
+Unknown or deleted modern UUIDs are not reassigned through reused aliases.
+No API keys, OAuth tokens, or usage payloads are returned. Existing usage retention
+and collection determine available history; this read neither probes upstreams
+nor changes routing or limits.
