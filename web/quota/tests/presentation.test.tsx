@@ -27,3 +27,15 @@ test('table represents missing observations without claiming quota is full', () 
  expect(html).toContain('scope="row"');
  expect(html).toContain('scope="col"');
 });
+
+test('quota bars mark the even-pace reference only for running windows', () => {
+ const now=Date.parse('2026-10-08T12:00:00Z');
+ const running={...account,windows:[{...account.windows[0],remaining_ratio:.2,reset_at:'2026-10-08T13:00:00Z'},account.windows[2]]};
+ for (const view of ['cards','table'] as const) {
+  const html=renderToStaticMarkup(<QuotaAccounts accounts={[running]} view={view} now={now} />);
+  expect(html.match(/left:20%/g)).toHaveLength(1);
+  expect(html).toContain('title="Even pace: 20% remaining"');
+  expect(html).toContain('aria-hidden="true"');
+ }
+ expect(renderToStaticMarkup(<QuotaAccounts accounts={[account]} view="cards" now={now} />)).not.toContain('Even pace');
+});

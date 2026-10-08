@@ -102,7 +102,8 @@ export function QuotaDashboard({ api }: { api: QuotaApi }) {
       window.removeEventListener('online', online);
     };
   }, [load]);
-  const presentation = observationPresentation(accounts, routing, Date.now());
+  const now = Date.now();
+  const presentation = observationPresentation(accounts, routing, now);
   const displayedAccounts = connectionAccounts(filterUserAccounts(routingAccounts(presentation.accounts, presentation.routing, groups, group), users, user), error);
   return (
     <div className={styles.page}>
@@ -141,7 +142,7 @@ export function QuotaDashboard({ api }: { api: QuotaApi }) {
         <p>{t(refreshing ? 'quota_dashboard.refreshing' : 'quota_dashboard.empty')}</p>
       )}
       <div className={styles.contents} data-size={preferences.size}>
-        <QuotaAccounts accounts={displayedAccounts} view={preferences.view} routing={presentation.routing} users={users} usage={usage} groups={groups} />
+        <QuotaAccounts accounts={displayedAccounts} view={preferences.view} routing={presentation.routing} users={users} usage={usage} groups={groups} now={now} />
       </div>
     </div>
   );

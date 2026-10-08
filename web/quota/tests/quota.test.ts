@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { remainingPercent } from '../src/logic';
+import { linearPacePercent, remainingPercent } from '../src/logic';
 import type { QuotaWindow } from '../src/api';
 const window = (remaining: number | null, used: number | null): QuotaWindow => ({
   id: 'five',
@@ -16,6 +16,24 @@ describe('quota dashboard capacity', () => {
     expect(remainingPercent(window(null, 0.89))).toBeCloseTo(11));
   test('prefers explicit remaining', () => expect(remainingPercent(window(0.99, 0.9))).toBe(99));
   test('rejects non-finite quota', () => expect(remainingPercent(window(NaN, null))).toBeNull());
+});
+describe('linear pace reference', () => {
+  const now = Date.parse('2026-10-08T12:00:00Z');
+  const resetIn = (hours: number | null, seconds: number | null = 18000): QuotaWindow => ({
+    ...window(0.3, null),
+    window_seconds: seconds,
+    reset_at: hours == null ? null : new Date(now + hours * 3600_000).toISOString(),
+  });
+  test('halfway through a five-hour window is 50%', () => expect(linearPacePercent(resetIn(2.5), now)).toBe(50));
+  test('tracks elapsed time, not usage', () => expect(linearPacePercent(resetIn(4), now)).toBeCloseTo(80));
+  test('weekly windows use their own length', () => expect(linearPacePercent(resetIn(42, 604800), now)).toBe(25));
+  test('unstarted, reset or unsized windows have no pace', () => {
+    expect(linearPacePercent(resetIn(null), now)).toBeNull();
+    expect(linearPacePercent(resetIn(0), now)).toBeNull();
+    expect(linearPacePercent(resetIn(-1), now)).toBeNull();
+    expect(linearPacePercent(resetIn(2, null), now)).toBeNull();
+  });
+  test('clock skew past the window length clamps to 100%', () => expect(linearPacePercent(resetIn(6), now)).toBe(100));
 });
 
 import { startQuotaPolling } from '../src/polling';

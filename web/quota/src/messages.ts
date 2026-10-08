@@ -35,6 +35,7 @@ const messages: Record<string, string> = {
   "weekly": "Weekly quota",
   "remaining": "{{percent}}% remaining",
   "reset": "Resets: {{time}}",
+  "linear_pace": "Even pace: {{percent}}% remaining",
   "not_started": "Timer not started / not reported",
   "unknown": "Unknown",
   "fresh": "Current quota",

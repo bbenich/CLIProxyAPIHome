@@ -43,7 +43,9 @@
 .windowHeading {display:flex;align-items:baseline;justify-content:space-between;gap:var(--space);flex-wrap:wrap}
 .windowHeading h3 {font-size:var(--text);margin:0}
 .windowHeading strong {font-size:var(--amount)}
-.window progress {display:block;width:100%;height:var(--bar);margin:var(--space) 0;accent-color:#008577}
+.bar {position:relative;margin:var(--space) 0}
+.window progress {display:block;width:100%;height:var(--bar);margin:0;accent-color:#008577}
+.pace {position:absolute;top:-3px;bottom:-3px;width:2px;margin-left:-1px;border-radius:1px;background:#d92d20;pointer-events:none}
 .window p {font-size:var(--small);margin:0;opacity:.7;line-height:1.5}
 .window progress.low {accent-color:#a86300}
 .footer {font-size:var(--small);margin-top:var(--gap)}
