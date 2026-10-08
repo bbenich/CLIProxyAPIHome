@@ -45,6 +45,8 @@ Home management state 存储在 database-backed cluster repository 中。如果�
 
 `/v8/management/*` 和 `/v0/management/*` 管理路由需要 management key。例外是 `GET/POST /v8/management/oauth/callback`：该接口通过待完成的 OAuth `state` 校验，不经过管理密钥中间件；仍受接口可用性检查约束，Management API 禁用时 v8 回调也禁用。
 
+`/v8/management/*` 和 `/v0/management/*` 的请求体上限为 64 MiB，无需认证的 v8 OAuth 回调上限为 64 KiB。声明的 `Content-Length` 超过上限时，在读取请求体之前直接返回 `413 {"error":"request_body_too_large"}`；长度未知的请求体在达到上限时被截断，请求返回 `413`。下文各接口单独说明的更小上限仍然有效。
+
 支持的请求头：
 
 | Header | Value |
@@ -1021,6 +1023,8 @@ Path 参数：
 
 用户记录包含 `period_limits_summary`：由记录本身推导的轻量概览（不查询用量）。`enabled_windows` 列出已配置限额的窗口（`5h`/`1d`/`7d`/`30d`），`zero_limit_windows` 列出限额为 `0`（立即阻断）的窗口。实时 used/remaining 请使用 `GET /users/:id/period-limits`。
 
+用户响应中的 `mfa` 会脱敏：TOTP 密钥（顶层与 `totp` 内的 `secret`）、防重放计数器 `last_used_counter`，以及其他疑似密钥的字段（恢复码/备用码、token、key 等）都会被移除；`enabled`、`issuer`、`account`、`period`、`digits`、`algorithm`、`bound_at` 等非敏感字段保留。存储的 `mfa` 不是 JSON 对象时返回 `null`。
+
 ### POST `/users`
 
 创建用户。
@@ -1054,7 +1058,7 @@ Path 参数：
 | `week_reset_hour` | integer | 否 | 自然周起点小时 `0-23`（默认 `0`）。 |
 | `limit_30d_credits` | number/null | 否 | 30 天/自然月 credits 限额。 |
 | `window_mode_30d` | string | 否 | `first_use`、`sliding`（别名 `rolling`）或 `calendar`（默认 `first_use`）。`calendar` 为自然月。 |
-| `mfa` | any valid JSON | 否 | 存入 `user.mfa`。 |
+| `mfa` | any valid JSON | 否 | 存入 `user.mfa`。响应中返回脱敏后的值（见 `GET /users/:id`）。 |
 | `passkey` | any valid JSON | 否 | 存入 `user.passkey`。 |
 
 输出：与 `GET /users/:id` 相同。
@@ -1100,6 +1104,7 @@ JSON 语法错误，或请求体无法解析到足以可靠定位具体字段时
 所有字段均可选；如果出现 `username`，则不能为空。`credits` 如果出现，会替换用户当前点数余额。对于计费工作流，优先使用 `/billing/balance-records/recharge` 和 `/billing/balance-records/deduct`，以便余额变更拥有分类账记录。
 当用户需要无限总余额、但仍受独立周期限额约束时，将 `credits_unlimited` 设为 `true`。
 请求中出现 `password` 且更新成功时，会递增用户 session version，使此前签发的所有 User API bearer token 失效。Management API 不会签发替换用户 session。
+由于响应会对 `mfa` 脱敏，若 `mfa` 是不含任何密钥字段、但仍表示 TOTP 已启用（`totp.enabled`；没有 `totp` 对象时看顶层 `enabled`）的对象，会被视为回传的脱敏值：存储的 MFA 若含密钥则保持不变。要关闭或重置 MFA，请发送 `null`、`{}` 或 `enabled: false` 的对象；包含 `secret` 的对象会替换存储值。
 
 校验失败使用与 `POST /users` 相同的 `field_errors` 契约。
 
@@ -2353,7 +2358,7 @@ Query 参数：
 
 此 v8 接口不要求管理密钥，通过数据库中待完成的 OAuth state 校验，仍受 Management API 可用性检查约束。v0 的 `POST /v0/management/oauth-callback` 仍要求管理认证。
 
-`GET` 接受查询参数，`POST` 接受 JSON：
+`GET` 接受查询参数，`POST` 接受不超过 64 KiB 的 JSON：
 
 ```json
 {
@@ -2380,6 +2385,7 @@ Kimi、Kimi AI 和 Meta 使用设备授权，不通过此回调完成。provider
 | `400` | `invalid body`、`invalid redirect_url`、`state is required`、`invalid state`、`code or error is required`、`unsupported provider`、`provider does not match state` |
 | `404` | `unknown or expired state` |
 | `409` | `oauth flow is not pending` |
+| `413` | `request body too large` 或 `request_body_too_large`（POST 请求体超过 64 KiB） |
 | `500` | `oauth_session_failed` |
 
 ### POST `/oauth/import?provider=vertex`
@@ -3337,13 +3343,13 @@ Path 参数：
 
 从对应 Home 本机 `logs` 目录下载 request log 文件。`home_ip` 用来指明文件属于哪台 Home，可选 `home_port` 用于区分共享同一 IP 的多个 Home 节点；当目标不是当前 Home 时，当前 Home 会通过内部 mTLS-only cluster route 转发到目标 Home。文件按 request ID 匹配，文件系统仍是事实来源，所以文件已被删除时返回 `404`。
 
-存储和 usage 关联仍使用完整 request ID。下载时，完整 ID 和短显示 ID 统一以 `<id>.log` 作为文件名的字面后缀匹配。多个文件匹配时，Home 返回修改时间最新的文件。
+存储和 usage 关联仍使用完整 request ID。request log 文件名以 `-<request_id>.log` 结尾。完整 ID 匹配文件名以 `-<id>.log` 结尾的文件；8 位短显示 ID 还会匹配 request ID 部分以这 8 个字符结尾的文件。多个文件匹配时，Home 返回修改时间最新的文件。
 
 Path 参数：
 
 | Path | 类型 | 说明 |
 | --- | --- | --- |
-| `id` | string | 存储的完整 request ID 或 8 位显示 ID；拒绝 slash。 |
+| `id` | string | 存储的完整 request ID 或 8 位显示 ID。仅允许字母、数字、`.`、`_` 和 `-`，拒绝 `..`，最大长度 128；其他值返回 `400` 和 `invalid_request_id`。 |
 
 Query 参数：
 

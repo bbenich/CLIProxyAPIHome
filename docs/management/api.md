@@ -45,6 +45,8 @@ The route list below is the database-backed route set registered by `cmd/home` t
 
 Management routes under `/v8/management/*` and `/v0/management/*` require a management key. The exception is `GET/POST /v8/management/oauth/callback`: it validates a pending OAuth `state` without the management-key middleware. Availability checks still apply, so a disabled Management API also disables the v8 callback.
 
+Request bodies on `/v8/management/*` and `/v0/management/*` are limited to 64 MiB, and the unauthenticated v8 OAuth callback is limited to 64 KiB. A body that declares a larger `Content-Length` is rejected with `413 {"error":"request_body_too_large"}` before it is read; a body of unknown length is cut off at the limit and the request fails with `413`. Smaller per-route limits documented below still apply.
+
 Supported request headers:
 
 | Header | Value |
@@ -1022,6 +1024,8 @@ Example response:
 
 User records include `period_limits_summary`, a lightweight overview derived from the record itself (no usage queries): `enabled_windows` lists the windows whose limit is configured (`5h`/`1d`/`7d`/`30d`), and `zero_limit_windows` lists enabled windows with a `0` limit (immediately blocking). Use `GET /users/:id/period-limits` for live used/remaining data.
 
+User responses redact `mfa`: TOTP secrets (`secret` at the top level and in `totp`), the replay counter `last_used_counter`, and other secret-like keys (recovery or backup codes, tokens, keys) are omitted. Non-secret fields such as `enabled`, `issuer`, `account`, `period`, `digits`, `algorithm`, and `bound_at` are kept. A stored `mfa` value that is not a JSON object is returned as `null`.
+
 ### POST `/users`
 
 Creates a user.
@@ -1055,7 +1059,7 @@ Example request:
 | `week_reset_hour` | integer | no | Calendar week start hour `0-23` (default `0`). |
 | `limit_30d_credits` | number/null | no | 30-day / month credits limit. |
 | `window_mode_30d` | string | no | `first_use`, `sliding` (alias `rolling`), or `calendar` (default `first_use`). Calendar uses calendar months. |
-| `mfa` | any valid JSON | no | Stored in `user.mfa`. |
+| `mfa` | any valid JSON | no | Stored in `user.mfa`. Responses return it redacted (see `GET /users/:id`). |
 | `passkey` | any valid JSON | no | Stored in `user.passkey`. |
 
 Response: same shape as `GET /users/:id`.
@@ -1101,6 +1105,7 @@ Example request:
 All request fields are optional, but `username`, if present, must not be empty. `credits`, if present, replaces the user's current credit balance. For billing workflows, prefer `/billing/balance-records/recharge` and `/billing/balance-records/deduct` so balance changes have ledger records.
 Set `credits_unlimited` to `true` when the user should have unlimited total balance but still be constrained by configured period limits.
 When `password` is present, a successful update increments the user's session version and invalidates all previously issued User API bearer tokens. The Management API does not issue a replacement user session.
+Because responses redact `mfa`, an `mfa` object with no secret fields that still reports TOTP as enabled (`totp.enabled`, or the top-level `enabled` when there is no `totp` object) is treated as the redacted value echoed back: if the stored MFA holds a secret, it is left unchanged. To disable or reset MFA, send `null`, `{}`, or an object with `enabled: false`. An object that includes a `secret` replaces the stored value.
 
 Validation failures use the same `field_errors` contract as `POST /users`.
 
@@ -2355,7 +2360,7 @@ A missing `state` returns `200 {"status":"ok"}` and does not verify a login. A c
 
 This v8 endpoint does not require a management key. It validates the pending DB-backed OAuth state and remains subject to Management API availability checks. The v0 `POST /v0/management/oauth-callback` still requires management authentication.
 
-`GET` accepts query parameters; `POST` accepts JSON:
+`GET` accepts query parameters; `POST` accepts JSON of at most 64 KiB:
 
 ```json
 {
@@ -2382,6 +2387,7 @@ Kimi, Kimi AI, and Meta use device flow and are not completed by this callback. 
 | `400` | `invalid body`, `invalid redirect_url`, `state is required`, `invalid state`, `code or error is required`, `unsupported provider`, `provider does not match state` |
 | `404` | `unknown or expired state` |
 | `409` | `oauth flow is not pending` |
+| `413` | `request body too large` or `request_body_too_large` (POST body over 64 KiB) |
 | `500` | `oauth_session_failed` |
 
 ### POST `/oauth/import?provider=vertex`
@@ -3339,13 +3345,13 @@ Response: file attachment.
 
 Downloads a Home request log file from that Home's local `logs` directory. `home_ip` identifies which Home owns the file, and optional `home_port` disambiguates Home nodes that share the same IP. When the target is not the current Home, the current Home forwards the request to the target Home over an internal mTLS-only cluster route. Files are matched by request ID, and the file system remains the source of truth, so deleted files return `404`.
 
-Storage and usage correlation retain the full request ID. Downloads use `<id>.log` as the literal filename suffix for both full IDs and short display IDs. When multiple files match, Home returns the file with the most recent modification time.
+Storage and usage correlation retain the full request ID. Request-log filenames end with `-<request_id>.log`. A full ID matches files whose name ends with `-<id>.log`; an 8-character short display ID also matches files whose request ID part ends with those 8 characters. When multiple files match, Home returns the file with the most recent modification time.
 
 Path parameters:
 
 | Path | Type | Description |
 | --- | --- | --- |
-| `id` | string | Full stored request ID or an 8-character display ID; slashes are rejected. |
+| `id` | string | Full stored request ID or an 8-character display ID. Only letters, digits, `.`, `_`, and `-` are allowed, `..` is rejected, and the maximum length is 128; other values return `400` with `invalid_request_id`. |
 
 Query parameters:
 
