@@ -1,0 +1,74 @@
+FROM docker.io/eceasy/cli-proxy-api-home@sha256:14e666f537b26a3fe1cb1a17b458000ff80898edbd7d6cafd83a4d5f7450a49c AS upstream-panel
+
+FROM python:3.13-slim AS panel-export
+COPY --from=upstream-panel /CLIProxyAPIHome/CLIProxyAPIHome /tmp/upstream-home
+COPY home-repo/tools/export_embedded_panel.py /tools/export_embedded_panel.py
+RUN python /tools/export_embedded_panel.py /tmp/upstream-home /panel
+COPY home-repo/tools/extend_home_panel.py /tools/extend_home_panel.py
+RUN python /tools/extend_home_panel.py /panel
+
+FROM docker.io/oven/bun:1.3.14 AS frontend-build
+WORKDIR /frontend
+COPY ui-source/package.json ui-source/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY ui-source/. .
+RUN bun run verify
+
+FROM docker.io/oven/bun:1.3.14 AS quota-build
+WORKDIR /quota
+COPY home-repo/web/quota/package.json home-repo/web/quota/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY home-repo/web/quota/. .
+RUN bun run verify
+
+FROM golang:1.26-bookworm AS builder
+
+WORKDIR /app
+COPY --from=frontend-build /usr/local/bin/bun /usr/local/bin/bun
+
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential git && rm -rf /var/lib/apt/lists/*
+
+COPY home-repo/go.mod home-repo/go.sum ./
+
+RUN go mod download
+
+COPY home-repo/. .
+COPY --from=panel-export /panel/ internal/managementasset/static/
+COPY --from=frontend-build /frontend/dist/index.html internal/managementasset/static/console.html
+COPY --from=quota-build /quota/dist/index.html internal/managementasset/static/quota-dashboard.html
+
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+
+RUN test -z "$(gofmt -l internal/home/quota_selector*.go internal/home/runtime.go internal/home/hot_reload.go internal/home/usage_result.go internal/quota/collector.go cmd/home/main.go internal/cluster/management/config_compat.go internal/managementasset/updater.go internal/managementhttp/server.go internal/managementhttp/panel_navigation*.go)"
+RUN go test ./internal/home -run "TestQuotaReset|TestRoutingObservation"
+RUN go test ./internal/cluster -run "Test.*(Quota|Probe|Snapshot)|TestAllowedDispatchIDsForAPIKeyModelIntersectsModelChannels|TestRuntimeAdapterEnforcesModelChannelBindingsInHomeDispatch"
+RUN go test ./internal/cluster/management -run "TestRoutingObservation|TestRoutingStrategy"
+RUN go test ./internal/quota
+RUN go test ./internal/cluster/management -run "TestQuotaUserScopes|TestQuotaRecentUsage"
+RUN go test ./internal/managementhttp -run "TestPanelNavigation|Test.*Asset"
+RUN bun test tools/home_panel_integration.test.ts
+RUN test -s internal/managementasset/static/management.html && test -s internal/managementasset/static/quota-dashboard.html
+
+RUN CGO_ENABLED=1 GOOS=linux go build -buildvcs=false -ldflags="-s -w -X 'main.Version=${VERSION}' -X 'main.Commit=${COMMIT}' -X 'main.BuildDate=${BUILD_DATE}'" -o ./CLIProxyAPIHome ./cmd/home/
+
+FROM debian:bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata ca-certificates && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir /CLIProxyAPIHome
+
+COPY --from=builder ./app/CLIProxyAPIHome /CLIProxyAPIHome/CLIProxyAPIHome
+
+COPY home-repo/config.example.yaml /CLIProxyAPIHome/config.example.yaml
+
+WORKDIR /CLIProxyAPIHome
+
+EXPOSE 8327
+
+ENV TZ=Asia/Shanghai
+
+RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && echo "${TZ}" > /etc/timezone
+
+CMD ["./CLIProxyAPIHome"]

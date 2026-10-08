@@ -1,0 +1,14 @@
+# Copy beside the home-repo/ and ui-source/ checkouts as compose.yaml.
+# Copy tools/root.dockerignore there too, then run: docker compose build cli-proxy-home
+# Build only: runtime database, credentials, ports and services are deployment-owned.
+name: cli-proxy-quota-build
+services:
+  cli-proxy-home:
+    image: localhost/cli-proxy-home:quota-reset
+    build:
+      context: .
+      dockerfile: home-repo/Dockerfile.quota
+      args:
+        VERSION: custom-quota-reset
+        COMMIT: local
+        BUILD_DATE: unknown

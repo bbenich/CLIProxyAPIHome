@@ -39,3 +39,7 @@ plugins
 .gemini/*
 .worktrees/
 .superpowers/
+
+!docs/local-quota-dashboard.md
+
+web/quota/node_modules/
