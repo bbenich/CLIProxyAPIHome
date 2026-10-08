@@ -2,6 +2,7 @@ package respserver
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -10,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -58,6 +61,49 @@ const (
 	respAuthSourceMTLS = "mtls"
 )
 
+const (
+	// respUnauthenticatedIdleTimeout bounds how long a connection without mTLS
+	// may stay silent between commands. Authenticated CPA connections are pooled
+	// and subscribed, so they intentionally have no idle deadline.
+	respUnauthenticatedIdleTimeout = 30 * time.Second
+	// respFrameReadTimeout bounds how long a single command frame may take to
+	// arrive once its first byte has been received.
+	respFrameReadTimeout = 30 * time.Second
+	// respWriteTimeout bounds every reply or subscription write.
+	respWriteTimeout = 30 * time.Second
+
+	// respMaxLineBytes bounds RESP header and simple-string lines.
+	respMaxLineBytes = 64 * 1024
+	// respBulkReadChunkBytes bounds how far a bulk buffer grows ahead of the bytes received.
+	respBulkReadChunkBytes = 64 * 1024
+	// respArgsPreallocLimit bounds argument slice preallocation from wire counts.
+	respArgsPreallocLimit = 16
+
+	// Before mTLS only CERTIFICATE REQUEST (5 arguments with a CSR PEM) is useful.
+	respUnauthenticatedMaxArgs       = 8
+	respUnauthenticatedMaxFrameBytes = 64 * 1024
+	// Authenticated CPA frames carry request logs with full bodies, in-flight
+	// snapshot parts and usage batches. The cap matches the Redis default
+	// proto-max-bulk-len and is applied to the whole frame.
+	respAuthenticatedMaxArgs       = 4096
+	respAuthenticatedMaxFrameBytes = 512 * 1024 * 1024
+)
+
+var errRESPProtocol = errors.New("protocol error")
+
+// respFrameLimits bounds a single inbound RESP command frame.
+type respFrameLimits struct {
+	maxArgs       int
+	maxFrameBytes int
+}
+
+func respFrameLimitsFor(authenticated bool) respFrameLimits {
+	if authenticated {
+		return respFrameLimits{maxArgs: respAuthenticatedMaxArgs, maxFrameBytes: respAuthenticatedMaxFrameBytes}
+	}
+	return respFrameLimits{maxArgs: respUnauthenticatedMaxArgs, maxFrameBytes: respUnauthenticatedMaxFrameBytes}
+}
+
 // New creates a new.
 func New(addr string, runtime *home.Runtime) *Server {
 	if errSanitize := resppush.SanitizeUsageLog(); errSanitize != nil {
@@ -71,7 +117,34 @@ func New(addr string, runtime *home.Runtime) *Server {
 	}
 	limits := cluster.DefaultInFlightLimits()
 	server.inFlightLimits.Store(&limits)
+	if runtime != nil {
+		// Every config apply path publishes the new config after applying it, so
+		// re-check allow-host for existing connections on each publish.
+		runtime.SubscribeConfigYAML(func([]byte) error {
+			server.enforceAllowHost()
+			return nil
+		})
+	}
 	return server
+}
+
+// enforceAllowHost closes tracked connections whose remote IP is no longer allowed.
+func (s *Server) enforceAllowHost() {
+	if s == nil || s.runtime == nil || s.fingerprints == nil {
+		return
+	}
+	cfg := s.runtime.Config()
+	if cfg == nil || len(cfg.AllowHost) == 0 {
+		return
+	}
+	allowHosts := append([]string(nil), cfg.AllowHost...)
+	closed := s.fingerprints.CloseConnectionsWhere(func(conn net.Conn) bool {
+		clientIP, _ := resolveRemoteIP(conn.RemoteAddr())
+		return !isClientHostAllowed(clientIP, allowHosts)
+	})
+	if closed > 0 {
+		log.WithField("connections", closed).Warn("closed resp connections from hosts no longer allowed")
+	}
 }
 
 // SetInFlightSnapshotStore sets the repository used to ingest in-flight observation frames.
@@ -337,6 +410,14 @@ func (s *Server) HandleConn(ctx context.Context, conn net.Conn) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.WithField("panic", recovered).Errorf("resp connection handler panic\n%s", debug.Stack())
+			if errClose := conn.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+				log.Errorf("resp panicked connection close error: %v", errClose)
+			}
+		}
+	}()
 
 	clientIP, _ := resolveRemoteIP(conn.RemoteAddr())
 	if s.runtime != nil {
@@ -358,6 +439,7 @@ func (s *Server) HandleConn(ctx context.Context, conn net.Conn) {
 	}
 	reader := bufio.NewReader(conn)
 	writer := newSafeWriter(conn)
+	frameLimits := respFrameLimitsFor(isRESPAuthenticated(authSource))
 	connectionLifetime := cluster.ConnectionLifetime{
 		Fingerprint: clientCertificateFingerprint,
 	}
@@ -492,9 +574,14 @@ func (s *Server) HandleConn(ctx context.Context, conn net.Conn) {
 	for {
 		pendingConfigSubscriptionReady = nil
 		pendingConfigSubscriptionAborted = nil
-		args, errRead := readRESPArray(reader)
+		if errDeadline := armRESPIdleReadDeadline(conn, isRESPAuthenticated(authSource)); errDeadline != nil {
+			return
+		}
+		args, errRead := readRESPArray(reader, frameLimits, func() error {
+			return conn.SetReadDeadline(time.Now().Add(respFrameReadTimeout))
+		})
 		if errRead != nil {
-			if !errors.Is(errRead, io.EOF) {
+			if errors.Is(errRead, errRESPProtocol) {
 				_ = writer.WriteRedisError("ERR " + errRead.Error())
 			}
 			return
@@ -514,6 +601,13 @@ func (s *Server) HandleConn(ctx context.Context, conn net.Conn) {
 		closeConnection := false
 		var livenessFailure *cluster.ConnectionLifetime
 		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.WithField("panic", recovered).Errorf("resp command handler panic\n%s", debug.Stack())
+					hasReply = false
+					closeConnection = true
+				}
+			}()
 			if len(args) == 0 {
 				_ = writer.WriteRedisError("ERR empty command")
 				return
@@ -662,15 +756,31 @@ func (s *Server) HandleConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
-// readRESPArray reads a resp array.
-func readRESPArray(reader *bufio.Reader) ([]string, error) {
+// armRESPIdleReadDeadline sets the read deadline used while waiting for the next frame.
+// Unauthenticated connections get an idle deadline; authenticated CPA connections
+// are pooled or subscribed and may legitimately stay idle, so theirs is cleared.
+func armRESPIdleReadDeadline(conn net.Conn, authenticated bool) error {
+	if authenticated {
+		return conn.SetReadDeadline(time.Time{})
+	}
+	return conn.SetReadDeadline(time.Now().Add(respUnauthenticatedIdleTimeout))
+}
+
+// readRESPArray reads a resp array within limits. onFrameStart runs once the
+// first byte of the frame has arrived.
+func readRESPArray(reader *bufio.Reader, limits respFrameLimits, onFrameStart func() error) ([]string, error) {
 	// Decode the wire frame before dispatching command handling.
 	prefix, errRead := reader.ReadByte()
 	if errRead != nil {
 		return nil, errRead
 	}
+	if onFrameStart != nil {
+		if errStart := onFrameStart(); errStart != nil {
+			return nil, errStart
+		}
+	}
 	if prefix != '*' {
-		return nil, fmt.Errorf("protocol error")
+		return nil, errRESPProtocol
 	}
 	line, errLine := readRESPLine(reader)
 	if errLine != nil {
@@ -678,67 +788,111 @@ func readRESPArray(reader *bufio.Reader) ([]string, error) {
 	}
 	count, errAtoi := strconv.Atoi(line)
 	if errAtoi != nil || count < 0 {
-		return nil, fmt.Errorf("protocol error")
+		return nil, fmt.Errorf("%w: invalid multibulk length", errRESPProtocol)
 	}
-	args := make([]string, 0, count)
+	if count > limits.maxArgs {
+		return nil, fmt.Errorf("%w: too many arguments", errRESPProtocol)
+	}
+	args := make([]string, 0, min(count, respArgsPreallocLimit))
+	remaining := limits.maxFrameBytes
 	for i := 0; i < count; i++ {
-		value, errValue := readRESPString(reader)
+		value, errValue := readRESPString(reader, remaining)
 		if errValue != nil {
 			return nil, errValue
 		}
+		remaining -= len(value)
 		args = append(args, value)
 	}
 	return args, nil
 }
 
-// readRESPString reads a resp string.
-func readRESPString(reader *bufio.Reader) (string, error) {
+// readRESPString reads a resp string of at most maxLength bytes.
+func readRESPString(reader *bufio.Reader, maxLength int) (string, error) {
 	prefix, errRead := reader.ReadByte()
 	if errRead != nil {
 		return "", errRead
 	}
 	switch prefix {
 	case '$':
-		return readRESPBulkString(reader)
+		return readRESPBulkString(reader, maxLength)
 	case '+', ':':
-		return readRESPLine(reader)
+		line, errLine := readRESPLine(reader)
+		if errLine != nil {
+			return "", errLine
+		}
+		if len(line) > maxLength {
+			return "", fmt.Errorf("%w: frame too large", errRESPProtocol)
+		}
+		return line, nil
 	default:
-		return "", fmt.Errorf("protocol error")
+		return "", errRESPProtocol
 	}
 }
 
-// readRESPBulkString reads a resp bulk string.
-func readRESPBulkString(reader *bufio.Reader) (string, error) {
+// readRESPBulkString reads a resp bulk string of at most maxLength bytes.
+func readRESPBulkString(reader *bufio.Reader, maxLength int) (string, error) {
 	line, errLine := readRESPLine(reader)
 	if errLine != nil {
 		return "", errLine
 	}
 	length, errAtoi := strconv.Atoi(line)
 	if errAtoi != nil {
-		return "", fmt.Errorf("protocol error")
+		return "", fmt.Errorf("%w: invalid bulk length", errRESPProtocol)
 	}
 	if length < 0 {
 		return "", nil
 	}
-	buf := make([]byte, length+2)
-	if _, errRead := io.ReadFull(reader, buf); errRead != nil {
-		return "", errRead
+	if length > maxLength {
+		return "", fmt.Errorf("%w: invalid bulk length", errRESPProtocol)
 	}
-	if length+2 < 2 || buf[length] != '\r' || buf[length+1] != '\n' {
-		return "", fmt.Errorf("protocol error")
+	// Grow the buffer only as bytes arrive so a declared length cannot reserve
+	// memory ahead of the payload actually received.
+	buf := make([]byte, 0, min(length, respBulkReadChunkBytes))
+	for len(buf) < length {
+		next := min(length-len(buf), respBulkReadChunkBytes)
+		buf = slices.Grow(buf, next)
+		count, errRead := io.ReadFull(reader, buf[len(buf):len(buf)+next])
+		buf = buf[:len(buf)+count]
+		if errRead != nil {
+			return "", unexpectedEOF(errRead)
+		}
 	}
-	return string(buf[:length]), nil
+	var terminator [2]byte
+	if _, errRead := io.ReadFull(reader, terminator[:]); errRead != nil {
+		return "", unexpectedEOF(errRead)
+	}
+	if terminator[0] != '\r' || terminator[1] != '\n' {
+		return "", errRESPProtocol
+	}
+	return string(buf), nil
 }
 
-// readRESPLine reads a resp line.
-func readRESPLine(reader *bufio.Reader) (string, error) {
-	line, errRead := reader.ReadString('\n')
-	if errRead != nil {
-		return "", errRead
+func unexpectedEOF(err error) error {
+	if errors.Is(err, io.EOF) {
+		return io.ErrUnexpectedEOF
 	}
-	line = strings.TrimSuffix(line, "\n")
-	line = strings.TrimSuffix(line, "\r")
-	return line, nil
+	return err
+}
+
+// readRESPLine reads a resp line of at most respMaxLineBytes bytes.
+func readRESPLine(reader *bufio.Reader) (string, error) {
+	var line []byte
+	for {
+		chunk, errRead := reader.ReadSlice('\n')
+		if len(line)+len(chunk) > respMaxLineBytes {
+			return "", fmt.Errorf("%w: line too long", errRESPProtocol)
+		}
+		line = append(line, chunk...)
+		if errRead == nil {
+			break
+		}
+		if !errors.Is(errRead, bufio.ErrBufferFull) {
+			return "", errRead
+		}
+	}
+	line = bytes.TrimSuffix(line, []byte("\n"))
+	line = bytes.TrimSuffix(line, []byte("\r"))
+	return string(line), nil
 }
 
 // writeRedisSimpleString writes a redis simple string.

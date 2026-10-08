@@ -393,8 +393,11 @@ func commandRequiresControlledLifetime(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
+	// Every command that dispatches credentials or mutates Home state requires a
+	// controlled lifetime. LPRUSH is a legacy alias of LPUSH usage and SETNX is
+	// the standalone form of SET NX.
 	switch strings.ToUpper(strings.TrimSpace(args[0])) {
-	case "RPOP", "LPUSH", "RPUSH", "SET", "CAS", "DEL", "MSET", "INCRBY", "EXPIRE":
+	case "RPOP", "LPUSH", "LPRUSH", "RPUSH", "SET", "SETNX", "CAS", "DEL", "MSET", "INCRBY", "EXPIRE":
 		return true
 	default:
 		return false

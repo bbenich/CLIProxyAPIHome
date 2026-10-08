@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,15 @@ import (
 const (
 	clusterRESPTimeout               = 35 * time.Second
 	clusterRESPStructuredErrorMarker = " home-error-v1:"
+
+	// clusterRESPMaxBulkBytes bounds forwarded refresh responses, which carry a
+	// single credential payload.
+	clusterRESPMaxBulkBytes = 64 * 1024 * 1024
+	// clusterRESPMaxLineBytes bounds header, status and error lines; structured
+	// refresh errors can embed an upstream response diagnostic.
+	clusterRESPMaxLineBytes = 1024 * 1024
+	// clusterRESPReadChunkBytes bounds how far a bulk buffer grows ahead of the bytes received.
+	clusterRESPReadChunkBytes = 64 * 1024
 )
 
 type RESPHandler struct {
@@ -454,7 +464,7 @@ func readRESPBulk(reader *bufio.Reader) ([]byte, error) {
 	}
 	switch prefix {
 	case '$':
-		line, errLine := reader.ReadString('\n')
+		line, errLine := readClusterRESPLine(reader)
 		if errLine != nil {
 			return nil, errLine
 		}
@@ -465,25 +475,58 @@ func readRESPBulk(reader *bufio.Reader) ([]byte, error) {
 		if size < 0 {
 			return nil, fmt.Errorf("cluster resp: nil bulk response")
 		}
-		payload := make([]byte, size+2)
-		if _, errFull := io.ReadFull(reader, payload); errFull != nil {
+		if size > clusterRESPMaxBulkBytes {
+			return nil, fmt.Errorf("cluster resp: bulk response too large")
+		}
+		// Grow the buffer only as bytes arrive so a declared size cannot reserve
+		// memory ahead of the payload actually received.
+		payload := make([]byte, 0, min(size, clusterRESPReadChunkBytes))
+		for len(payload) < size {
+			next := min(size-len(payload), clusterRESPReadChunkBytes)
+			payload = slices.Grow(payload, next)
+			count, errFull := io.ReadFull(reader, payload[len(payload):len(payload)+next])
+			payload = payload[:len(payload)+count]
+			if errFull != nil {
+				return nil, errFull
+			}
+		}
+		var terminator [2]byte
+		if _, errFull := io.ReadFull(reader, terminator[:]); errFull != nil {
 			return nil, errFull
 		}
-		return payload[:size], nil
+		return payload, nil
 	case '+':
-		line, errLine := reader.ReadString('\n')
+		line, errLine := readClusterRESPLine(reader)
 		if errLine != nil {
 			return nil, errLine
 		}
 		return []byte(strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")), nil
 	case '-':
-		line, errLine := reader.ReadString('\n')
+		line, errLine := readClusterRESPLine(reader)
 		if errLine != nil {
 			return nil, errLine
 		}
 		return nil, parseClusterRESPError(line)
 	default:
 		return nil, fmt.Errorf("cluster resp: unsupported response prefix %q", prefix)
+	}
+}
+
+// readClusterRESPLine reads one line, including its terminator, of at most clusterRESPMaxLineBytes.
+func readClusterRESPLine(reader *bufio.Reader) (string, error) {
+	var line []byte
+	for {
+		chunk, errRead := reader.ReadSlice('\n')
+		if len(line)+len(chunk) > clusterRESPMaxLineBytes {
+			return "", fmt.Errorf("cluster resp: response line too long")
+		}
+		line = append(line, chunk...)
+		if errRead == nil {
+			return string(line), nil
+		}
+		if !errors.Is(errRead, bufio.ErrBufferFull) {
+			return "", errRead
+		}
 	}
 }
 

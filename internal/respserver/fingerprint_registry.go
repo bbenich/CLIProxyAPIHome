@@ -144,6 +144,7 @@ func (c *TrackedConnection) AttachSubscriptionLifetime(lifetime cluster.Connecti
 		if oldEntry != newEntry {
 			delete(oldEntry.connections, c)
 			oldEntry.signalChanged()
+			c.registry.pruneEntryLocked(oldEntry)
 		}
 		newEntry.connections[c] = struct{}{}
 		c.entry = newEntry
@@ -186,6 +187,7 @@ func (c *TrackedConnection) BeginHandler() (func(), error) {
 			entry.signalChanged()
 			close(c.handlersChanged)
 			c.handlersChanged = make(chan struct{})
+			c.registry.pruneEntryLocked(entry)
 			entry.mu.Unlock()
 			c.registry.mu.Unlock()
 		})
@@ -212,8 +214,11 @@ func (c *TrackedConnection) Close() error {
 			entry.mu.Lock()
 			delete(entry.connections, c)
 			entry.signalChanged()
+			c.registry.pruneEntryLocked(entry)
 			entry.mu.Unlock()
 		}
+		// A closed connection never begins new handlers or moves lifetimes.
+		c.entry = nil
 		c.registry.mu.Unlock()
 	})
 	return closeErr
@@ -288,6 +293,48 @@ func (r *FingerprintRegistry) LatestFenceRevision(lifetime cluster.ConnectionLif
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	return entry.fenceRevision
+}
+
+// CloseConnectionsWhere closes every tracked connection whose network connection
+// matches and returns how many were closed.
+func (r *FingerprintRegistry) CloseConnectionsWhere(match func(net.Conn) bool) int {
+	if r == nil || match == nil {
+		return 0
+	}
+	r.mu.Lock()
+	var matched []*TrackedConnection
+	for _, entry := range r.entries {
+		entry.mu.Lock()
+		for connection := range entry.connections {
+			if connection.conn != nil && match(connection.conn) {
+				matched = append(matched, connection)
+			}
+		}
+		entry.mu.Unlock()
+	}
+	r.mu.Unlock()
+
+	for _, connection := range matched {
+		if errClose := connection.Close(); errClose != nil && !errors.Is(errClose, net.ErrClosed) {
+			log.WithError(errClose).Warn("tracked connection close failed")
+		}
+	}
+	return len(matched)
+}
+
+// pruneEntryLocked removes an entry that no longer tracks connections or
+// handlers. r.mu and entry.mu must be held. Fenced entries are kept: they are
+// the only local record that rejects Accept and subscription attachment for a
+// fenced lifetime, and that lifetime's (fingerprint, connected_at) key can still
+// be returned by membership classification until the database cancels it.
+func (r *FingerprintRegistry) pruneEntryLocked(entry *fingerprintEntry) {
+	if entry == nil || entry.fenced || entry.handlers != 0 || len(entry.connections) != 0 {
+		return
+	}
+	key := lifetimeKey(entry.lifetime)
+	if r.entries[key] == entry {
+		delete(r.entries, key)
+	}
 }
 
 func (r *FingerprintRegistry) entryLocked(key fingerprintLifetimeKey) *fingerprintEntry {

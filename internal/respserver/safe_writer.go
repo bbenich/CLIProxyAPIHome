@@ -5,22 +5,39 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPIHome/internal/respserver/dispatch"
 )
 
-type safeWriter struct {
-	mu  sync.Mutex
-	raw io.Writer
-	w   *bufio.Writer
+type writeDeadlineSetter interface {
+	SetWriteDeadline(time.Time) error
 }
 
-// newSafeWriter creates a safe writer.
+type safeWriter struct {
+	mu       sync.Mutex
+	raw      io.Writer
+	w        *bufio.Writer
+	deadline writeDeadlineSetter
+}
+
+// newSafeWriter creates a safe writer. When w supports write deadlines, every
+// write is bounded by respWriteTimeout so a peer that stops reading cannot pin
+// the writer forever.
 func newSafeWriter(w io.Writer) *safeWriter {
 	if w == nil {
 		return &safeWriter{}
 	}
-	return &safeWriter{raw: w, w: bufio.NewWriter(w)}
+	deadline, _ := w.(writeDeadlineSetter)
+	return &safeWriter{raw: w, w: bufio.NewWriter(w), deadline: deadline}
+}
+
+// armWriteDeadline must be called with w.mu held before writing.
+func (w *safeWriter) armWriteDeadline() error {
+	if w.deadline == nil {
+		return nil
+	}
+	return w.deadline.SetWriteDeadline(time.Now().Add(respWriteTimeout))
 }
 
 // WriteDispatchReply writes a dispatch reply.
@@ -30,6 +47,9 @@ func (w *safeWriter) WriteDispatchReply(reply dispatch.Reply) error {
 	defer w.mu.Unlock()
 	if w.w == nil {
 		return net.ErrClosed
+	}
+	if errDeadline := w.armWriteDeadline(); errDeadline != nil {
+		return errDeadline
 	}
 	if replyContainsSensitive(reply) {
 		if errFlush := w.w.Flush(); errFlush != nil {
@@ -92,6 +112,9 @@ func (w *safeWriter) WriteRedisSimpleString(value string) error {
 	if w.w == nil {
 		return net.ErrClosed
 	}
+	if errDeadline := w.armWriteDeadline(); errDeadline != nil {
+		return errDeadline
+	}
 	if errWrite := writeRedisSimpleString(w.w, value); errWrite != nil {
 		return errWrite
 	}
@@ -105,6 +128,9 @@ func (w *safeWriter) WriteRedisError(message string) error {
 	if w.w == nil {
 		return net.ErrClosed
 	}
+	if errDeadline := w.armWriteDeadline(); errDeadline != nil {
+		return errDeadline
+	}
 	if errWrite := writeRedisError(w.w, message); errWrite != nil {
 		return errWrite
 	}
@@ -117,6 +143,9 @@ func (w *safeWriter) WriteRedisBulkString(payload []byte) error {
 	defer w.mu.Unlock()
 	if w.w == nil {
 		return net.ErrClosed
+	}
+	if errDeadline := w.armWriteDeadline(); errDeadline != nil {
+		return errDeadline
 	}
 	if errWrite := writeRedisBulkString(w.w, payload); errWrite != nil {
 		return errWrite
