@@ -1,10 +1,12 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +14,10 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// ErrUserMFAChanged indicates that a conditional MFA update found the stored
+// MFA settings changed since the caller read them.
+var ErrUserMFAChanged = errors.New("user mfa changed concurrently")
 
 // ErrUserNotFound indicates that the referenced user record does not exist.
 var ErrUserNotFound = errors.New("user not found")
@@ -53,7 +59,10 @@ type UserUpdate struct {
 	Credits          *float64
 	CreditsUnlimited *bool
 	MFA              *JSONB
-	Passkey          *JSONB
+	// ExpectedMFA makes the MFA update conditional: it applies only while the
+	// stored MFA still matches this value, otherwise ErrUserMFAChanged.
+	ExpectedMFA *JSONB
+	Passkey     *JSONB
 
 	Timezone        *string
 	Limit5hCredits  OptionalFloatUpdate
@@ -243,6 +252,9 @@ func (r *Repository) UpdateUser(ctx context.Context, id uint, update UserUpdate)
 			return errApply
 		}
 		if update.MFA != nil {
+			if update.ExpectedMFA != nil && !jsonbEqual(record.MFA, *update.ExpectedMFA) {
+				return ErrUserMFAChanged
+			}
 			record.MFA = cloneJSONB(*update.MFA)
 		}
 		if update.Passkey != nil {
@@ -311,6 +323,22 @@ func ensureUserExists(ctx context.Context, tx *gorm.DB, id uint) error {
 		return fmt.Errorf("%w: %d", ErrUserNotFound, id)
 	}
 	return errFirst
+}
+
+// jsonbEqual compares JSON values semantically, because databases such as
+// PostgreSQL may normalize stored JSONB formatting.
+func jsonbEqual(a, b JSONB) bool {
+	if bytes.Equal(a, b) {
+		return true
+	}
+	if len(a) == 0 || len(b) == 0 {
+		return false
+	}
+	var left, right any
+	if json.Unmarshal(a, &left) != nil || json.Unmarshal(b, &right) != nil {
+		return false
+	}
+	return reflect.DeepEqual(left, right)
 }
 
 func cloneJSONB(value JSONB) JSONB {

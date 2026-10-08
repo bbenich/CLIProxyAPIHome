@@ -183,6 +183,22 @@ func (h *Handler) UpdateUser(c *gin.Context) {
 
 	ctx, cancel := h.requestContext(c)
 	defer cancel()
+	if update.MFA != nil && isRedactedMFAWrite(*update.MFA) {
+		// Responses redact MFA secrets. A secret-less MFA object that still
+		// claims to be enabled is the redacted form echoed back, so keep the
+		// stored secret instead of wiping it.
+		current, errCurrent := h.repo.GetUser(ctx, id)
+		if errCurrent != nil {
+			respondUserRecordError(c, "user_update_failed", errCurrent)
+			return
+		}
+		if mfaContainsSecret(current.MFA) {
+			update.MFA = nil
+		} else {
+			// Do not let the echo overwrite a TOTP binding made after this read.
+			update.ExpectedMFA = &current.MFA
+		}
+	}
 	record, errUpdate := h.repo.UpdateUser(ctx, id, update)
 	if errUpdate != nil {
 		if respondUserPeriodLimitValidationError(c, errUpdate) {
@@ -409,6 +425,10 @@ func respondUserRecordError(c *gin.Context, code string, err error) {
 		respondError(c, http.StatusConflict, "user_exists", err)
 		return
 	}
+	if errors.Is(err, cluster.ErrUserMFAChanged) {
+		respondError(c, http.StatusConflict, "user_mfa_changed", err)
+		return
+	}
 	respondError(c, http.StatusInternalServerError, code, err)
 }
 
@@ -504,7 +524,7 @@ func userRecordToMap(record *cluster.UserRecord) gin.H {
 		"usage_epoch_1d":          record.UsageEpoch1d,
 		"usage_epoch_7d":          record.UsageEpoch7d,
 		"usage_epoch_30d":         record.UsageEpoch30d,
-		"mfa":                     record.MFA,
+		"mfa":                     redactMFA(record.MFA),
 		"passkey":                 record.Passkey,
 		"created_at":              record.CreatedAt,
 		"updated_at":              record.UpdatedAt,
@@ -540,4 +560,116 @@ func userPeriodLimitsSummary(record *cluster.UserRecord) gin.H {
 		"enabled_windows":    enabled,
 		"zero_limit_windows": zeroLimited,
 	}
+}
+
+// isMFASecretField reports whether an MFA JSON key holds secret material or
+// replay state that must not leave Home through Management responses.
+func isMFASecretField(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	normalized = strings.ReplaceAll(normalized, "-", "_")
+	if normalized == "last_used_counter" {
+		return true
+	}
+	for _, marker := range []string{"secret", "seed", "recovery", "backup", "token", "password", "private", "key", "otpauth", "otp_auth"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactMFAValue returns a copy of value without secret MFA fields.
+func redactMFAValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			if isMFASecretField(key) {
+				continue
+			}
+			out[key] = redactMFAValue(item)
+		}
+		return out
+	case []any:
+		out := make([]any, 0, len(typed))
+		for _, item := range typed {
+			out = append(out, redactMFAValue(item))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+// redactMFA returns stored MFA settings without secrets. Values that are not
+// JSON objects are dropped because their content cannot be classified.
+func redactMFA(raw cluster.JSONB) cluster.JSONB {
+	if len(raw) == 0 {
+		return nil
+	}
+	var root map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &root); errUnmarshal != nil || root == nil {
+		return nil
+	}
+	redacted, errMarshal := json.Marshal(redactMFAValue(root))
+	if errMarshal != nil {
+		return nil
+	}
+	return cluster.JSONB(redacted)
+}
+
+// mfaValueContainsSecret reports whether value contains any secret MFA field.
+func mfaValueContainsSecret(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			if isMFASecretField(key) || mfaValueContainsSecret(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if mfaValueContainsSecret(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// mfaContainsSecret reports whether raw MFA settings hold secret material.
+func mfaContainsSecret(raw cluster.JSONB) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var value any
+	if errUnmarshal := json.Unmarshal(raw, &value); errUnmarshal != nil {
+		return false
+	}
+	return mfaValueContainsSecret(value)
+}
+
+// isRedactedMFAWrite reports whether a Management write carries a redacted
+// MFA object: a JSON object without secret fields that still claims MFA is
+// enabled. Explicit disables (null, {}, or enabled=false) are not redacted
+// writes and are applied as before.
+func isRedactedMFAWrite(raw cluster.JSONB) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var root map[string]any
+	if errUnmarshal := json.Unmarshal(raw, &root); errUnmarshal != nil || root == nil {
+		return false
+	}
+	if mfaValueContainsSecret(root) {
+		return false
+	}
+	// The nested TOTP object, when present, decides; otherwise the legacy
+	// top-level flag does.
+	if totp, ok := root["totp"].(map[string]any); ok {
+		enabled, _ := totp["enabled"].(bool)
+		return enabled
+	}
+	enabled, _ := root["enabled"].(bool)
+	return enabled
 }

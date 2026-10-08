@@ -32,6 +32,9 @@ type mfaSettings struct {
 	Digits    int           `json:"digits,omitempty"`
 	Algorithm string        `json:"algorithm,omitempty"`
 	TOTP      *totpSettings `json:"totp,omitempty"`
+	// LastUsedCounter is the last accepted TOTP time-step counter for the
+	// legacy top-level MFA layout.
+	LastUsedCounter int64 `json:"last_used_counter,omitempty"`
 }
 
 type totpSettings struct {
@@ -43,6 +46,9 @@ type totpSettings struct {
 	Digits    int        `json:"digits,omitempty"`
 	Algorithm string     `json:"algorithm,omitempty"`
 	BoundAt   *time.Time `json:"bound_at,omitempty"`
+	// LastUsedCounter is the last accepted TOTP time-step counter. Codes whose
+	// counter is less than or equal to it are rejected to prevent replay.
+	LastUsedCounter int64 `json:"last_used_counter,omitempty"`
 }
 
 func loadTOTP(raw cluster.JSONB) (*totpSettings, bool) {
@@ -64,13 +70,17 @@ func loadTOTP(raw cluster.JSONB) (*totpSettings, bool) {
 			Period:    settings.Period,
 			Digits:    settings.Digits,
 			Algorithm: settings.Algorithm,
+
+			LastUsedCounter: settings.LastUsedCounter,
 		})
 		return &next, true
 	}
 	return nil, false
 }
 
-func marshalTOTP(username string, secret string, issuer string) (cluster.JSONB, error) {
+// marshalTOTP builds MFA settings for a newly bound secret. lastUsedCounter is
+// the counter of the code that proved possession, so it cannot be replayed.
+func marshalTOTP(username string, secret string, issuer string, lastUsedCounter int64) (cluster.JSONB, error) {
 	now := time.Now().UTC()
 	settings := mfaSettings{
 		Enabled: true,
@@ -83,6 +93,8 @@ func marshalTOTP(username string, secret string, issuer string) (cluster.JSONB, 
 			Digits:    defaultTOTPDigits,
 			Algorithm: defaultTOTPAlgorithm,
 			BoundAt:   &now,
+
+			LastUsedCounter: lastUsedCounter,
 		},
 	}
 	raw, errMarshal := json.Marshal(settings)
@@ -123,23 +135,67 @@ func generateTOTPSecret() (string, error) {
 	return base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(buf), nil
 }
 
-func verifyTOTPCode(secret string, code string, now time.Time) bool {
+// matchTOTPCode reports the time-step counter matched by code within the
+// accepted +/-1 step window.
+func matchTOTPCode(secret string, code string, now time.Time) (int64, bool) {
 	secret = normalizeTOTPSecret(secret)
 	code = normalizeTOTPCode(code)
 	if secret == "" || code == "" {
-		return false
+		return 0, false
 	}
 	counter := now.UTC().Unix() / int64(defaultTOTPPeriod)
 	for offset := int64(-1); offset <= 1; offset++ {
 		expected, errCode := hotpCode(secret, counter+offset)
 		if errCode != nil {
-			return false
+			return 0, false
 		}
 		if subtle.ConstantTimeCompare([]byte(expected), []byte(code)) == 1 {
-			return true
+			return counter + offset, true
 		}
 	}
-	return false
+	return 0, false
+}
+
+// withTOTPLastUsedCounter returns raw MFA settings with the last accepted
+// counter updated in the layout loadTOTP reads from. Unknown fields are kept.
+func withTOTPLastUsedCounter(raw cluster.JSONB, counter int64) (cluster.JSONB, error) {
+	var settings mfaSettings
+	if errUnmarshal := json.Unmarshal(raw, &settings); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	var root map[string]json.RawMessage
+	if errUnmarshal := json.Unmarshal(raw, &root); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	if root == nil {
+		return nil, fmt.Errorf("mfa settings are empty")
+	}
+	counterRaw, errCounter := json.Marshal(counter)
+	if errCounter != nil {
+		return nil, errCounter
+	}
+	if settings.TOTP != nil && settings.TOTP.Enabled && strings.TrimSpace(settings.TOTP.Secret) != "" {
+		var nested map[string]json.RawMessage
+		if errUnmarshal := json.Unmarshal(root["totp"], &nested); errUnmarshal != nil {
+			return nil, errUnmarshal
+		}
+		if nested == nil {
+			return nil, fmt.Errorf("totp settings are empty")
+		}
+		nested["last_used_counter"] = counterRaw
+		nestedRaw, errNested := json.Marshal(nested)
+		if errNested != nil {
+			return nil, errNested
+		}
+		root["totp"] = nestedRaw
+	} else {
+		root["last_used_counter"] = counterRaw
+	}
+	next, errMarshal := json.Marshal(root)
+	if errMarshal != nil {
+		return nil, errMarshal
+	}
+	return cluster.JSONB(next), nil
 }
 
 func hotpCode(secret string, counter int64) (string, error) {

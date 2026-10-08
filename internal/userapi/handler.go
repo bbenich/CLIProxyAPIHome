@@ -20,10 +20,29 @@ import (
 
 const maxUserJSONBodyBytes int64 = 1 << 20
 
+// Login throttling counts every login attempt because the shared limiter can
+// only increment-and-check. Limits are keyed by (client IP, username) and by
+// client IP only, so a remote attacker cannot lock a victim out of logging in
+// from the victim's own address. The per-user TOTP limit is only reachable
+// after the correct password, so only a password holder can exhaust it.
+const (
+	loginIPUserLimit    = 20
+	loginIPUserWindow   = 15 * time.Minute
+	loginIPLimit        = 100
+	loginIPWindow       = 15 * time.Minute
+	loginTOTPUserLimit  = 10
+	loginTOTPUserWindow = 15 * time.Minute
+	// totpReplayWindow covers the whole time a code stays acceptable
+	// (current step plus one step of skew on each side).
+	totpReplayWindow = 4 * defaultTOTPPeriod * time.Second
+)
+
 type Handler struct {
 	repo                        *cluster.Repository
 	runtime                     *home.Runtime
 	forgotPasswordResponseFloor time.Duration
+	// now overrides the clock for login throttling and TOTP checks in tests.
+	now func() time.Time
 }
 
 type authFields struct {
@@ -248,6 +267,9 @@ func (h *Handler) Login(c *gin.Context) {
 	}
 	ctx, cancel := requestContext(c)
 	defer cancel()
+	if !h.allowLoginAttempt(c, ctx, h.currentTime(), loginAttemptLimits(c.ClientIP(), body.username())) {
+		return
+	}
 	record, ok := h.userByPassword(c, ctx, body.authFields)
 	if !ok {
 		return
@@ -270,6 +292,10 @@ func (h *Handler) LoginTOTP(c *gin.Context) {
 	}
 	ctx, cancel := requestContext(c)
 	defer cancel()
+	now := h.currentTime()
+	if !h.allowLoginAttempt(c, ctx, now, loginAttemptLimits(c.ClientIP(), body.username())) {
+		return
+	}
 	record, ok := h.userByPassword(c, ctx, body.authFields)
 	if !ok {
 		return
@@ -282,11 +308,47 @@ func (h *Handler) LoginTOTP(c *gin.Context) {
 		respondError(c, http.StatusBadRequest, "totp_not_enabled", fmt.Errorf("totp is not enabled"))
 		return
 	}
-	if !verifyTOTPCode(totp.Secret, body.totpCode(), time.Now().UTC()) {
+	userScope := "user:" + strconv.FormatUint(uint64(record.ID), 10)
+	if !h.allowLoginAttempt(c, ctx, now, []userSecurityActionLimit{
+		{action: "user_login_totp_user", scope: userScope, limit: loginTOTPUserLimit, window: loginTOTPUserWindow},
+	}) {
+		return
+	}
+	counter, matched := matchTOTPCode(totp.Secret, body.totpCode(), now)
+	if !matched || counter <= totp.LastUsedCounter {
 		respondError(c, http.StatusUnauthorized, "invalid_totp", fmt.Errorf("invalid totp code"))
 		return
 	}
-	h.respondLogin(c, ctx, record)
+	// Claim the counter atomically so concurrent requests cannot both accept
+	// the same code before the last-used counter is persisted.
+	claimed, _, errClaim := h.allowUserSecurityActions(ctx, now, []userSecurityActionLimit{
+		{action: "user_login_totp_counter", scope: userScope + ":counter:" + strconv.FormatInt(counter, 10), limit: 1, window: totpReplayWindow},
+	})
+	if errClaim != nil {
+		respondError(c, http.StatusInternalServerError, "login_failed", errClaim)
+		return
+	}
+	if !claimed {
+		respondError(c, http.StatusUnauthorized, "invalid_totp", fmt.Errorf("invalid totp code"))
+		return
+	}
+	mfa, errMFA := withTOTPLastUsedCounter(record.MFA, counter)
+	if errMFA != nil {
+		respondError(c, http.StatusInternalServerError, "login_failed", errMFA)
+		return
+	}
+	// Only record the counter while MFA is unchanged since it was read, so a
+	// concurrent reset or rebind is never overwritten by this login.
+	updated, errUpdate := h.repo.UpdateUser(ctx, record.ID, cluster.UserUpdate{MFA: &mfa, ExpectedMFA: &record.MFA})
+	if errors.Is(errUpdate, cluster.ErrUserMFAChanged) {
+		respondError(c, http.StatusUnauthorized, "invalid_totp", fmt.Errorf("invalid totp code"))
+		return
+	}
+	if errUpdate != nil {
+		respondUserError(c, "login_failed", errUpdate)
+		return
+	}
+	h.respondLogin(c, ctx, updated)
 }
 
 // LoginPasskey handles passkey login.
@@ -306,6 +368,9 @@ func (h *Handler) LoginPasskey(c *gin.Context) {
 
 	ctx, cancel := requestContext(c)
 	defer cancel()
+	if !h.allowLoginAttempt(c, ctx, h.currentTime(), loginAttemptLimits(c.ClientIP(), username)) {
+		return
+	}
 	record, errUser := h.repo.GetUserByUsername(ctx, username)
 	if errUser != nil {
 		respondAuthError(c, errUser)
@@ -415,7 +480,8 @@ func (h *Handler) BindTOTP(c *gin.Context) {
 		respondError(c, http.StatusBadRequest, "invalid_body", fmt.Errorf("secret and code are required"))
 		return
 	}
-	if !verifyTOTPCode(secret, code, time.Now().UTC()) {
+	counter, matched := matchTOTPCode(secret, code, h.currentTime())
+	if !matched {
 		respondError(c, http.StatusUnauthorized, "invalid_totp", fmt.Errorf("invalid totp code"))
 		return
 	}
@@ -425,7 +491,7 @@ func (h *Handler) BindTOTP(c *gin.Context) {
 	if !ok {
 		return
 	}
-	mfa, errMFA := marshalTOTP(record.Username, secret, body.Issuer)
+	mfa, errMFA := marshalTOTP(record.Username, secret, body.Issuer, counter)
 	if errMFA != nil {
 		respondError(c, http.StatusInternalServerError, "totp_bind_failed", errMFA)
 		return
@@ -753,6 +819,41 @@ func (h *Handler) userByPassword(c *gin.Context, ctx context.Context, fields aut
 		return nil, false
 	}
 	return record, true
+}
+
+// currentTime returns the handler clock in UTC.
+func (h *Handler) currentTime() time.Time {
+	if h != nil && h.now != nil {
+		return h.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// loginAttemptLimits returns the per-(IP, username) and per-IP login limits.
+// There is deliberately no username-only limit, so attempts from other
+// addresses cannot lock a user out.
+func loginAttemptLimits(clientIP string, username string) []userSecurityActionLimit {
+	ipScope := "ip:" + strings.TrimSpace(clientIP)
+	return []userSecurityActionLimit{
+		{action: "user_login_ip_user", scope: ipScope + "|user:" + strings.TrimSpace(username), limit: loginIPUserLimit, window: loginIPUserWindow},
+		{action: "user_login_ip", scope: ipScope, limit: loginIPLimit, window: loginIPWindow},
+	}
+}
+
+// allowLoginAttempt records a login attempt and writes a 429 response with
+// Retry-After when any limit is exceeded.
+func (h *Handler) allowLoginAttempt(c *gin.Context, ctx context.Context, now time.Time, limits []userSecurityActionLimit) bool {
+	allowed, retryAfter, errAllowed := h.allowUserSecurityActions(ctx, now, limits)
+	if errAllowed != nil {
+		respondError(c, http.StatusInternalServerError, "login_failed", errAllowed)
+		return false
+	}
+	if !allowed {
+		c.Header("Retry-After", retryAfterHeaderValue(retryAfter))
+		respondError(c, http.StatusTooManyRequests, "login_rate_limited", fmt.Errorf("login rate limit exceeded"))
+		return false
+	}
+	return true
 }
 
 func (h *Handler) requirePasskeyLogin(c *gin.Context, record *cluster.UserRecord) bool {
