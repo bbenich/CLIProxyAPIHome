@@ -36,14 +36,14 @@ func (r *Repository) CurrentDatabaseTime(ctx context.Context) (time.Time, error)
 }
 
 func databaseNowQuery(tx *gorm.DB) string {
-	if tx != nil && tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+	if tx != nil && tx.Dialector != nil && tx.Name() == "postgres" {
 		return "SELECT clock_timestamp()"
 	}
 	return "SELECT CURRENT_TIMESTAMP"
 }
 
 func databaseTimestampStep(tx *gorm.DB) time.Duration {
-	if tx != nil && tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+	if tx != nil && tx.Dialector != nil && tx.Name() == "postgres" {
 		return time.Microsecond
 	}
 	return time.Second

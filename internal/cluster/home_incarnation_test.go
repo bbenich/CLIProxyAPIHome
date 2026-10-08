@@ -287,7 +287,7 @@ func TestCoordinatorInitializeRetiresIncarnationWhenInitialHeartbeatFails(t *tes
 	if errCallback := repo.db.Callback().Update().Before("gorm:update").Register("test:fail_initial_home_heartbeat", func(tx *gorm.DB) {
 		values, ok := tx.Statement.Dest.(map[string]any)
 		if tx.Statement.Table == (HomeProcessIncarnationRecord{}).TableName() && ok && values["last_seen_at"] != nil {
-			tx.AddError(wantErr)
+			_ = tx.AddError(wantErr)
 		}
 	}); errCallback != nil {
 		t.Fatal(errCallback)

@@ -478,12 +478,11 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	unlockUpdate := m.updateLocks.lock(auth.ID)
 	defer unlockUpdate()
-	persisted := auth
+	// Persist the current registered snapshot; an unregistered auth persists nothing.
+	var persisted *Auth
 	m.mu.RLock()
 	if current := m.auths[auth.ID]; current != nil {
 		persisted = current.Clone()
-	} else {
-		persisted = nil
 	}
 	m.mu.RUnlock()
 	accepted, errPersist := m.persistLocked(ctx, persisted, true)
@@ -516,12 +515,11 @@ func (m *Manager) persistQueued(ctx context.Context, auth *Auth) error {
 	}
 
 	unlockUpdate := m.updateLocks.lock(auth.ID)
-	persisted := auth
+	// Persist the current registered snapshot; an unregistered auth persists nothing.
+	var persisted *Auth
 	m.mu.RLock()
 	if current := m.auths[auth.ID]; current != nil {
 		persisted = current.Clone()
-	} else {
-		persisted = nil
 	}
 	m.mu.RUnlock()
 	unlockUpdate()
@@ -549,9 +547,7 @@ func (m *Manager) persistWithStore(ctx context.Context, store Store, auth *Auth,
 			return true, nil
 		}
 	}
-	if auth.Disabled {
-		// Keep disabled auth entries persisted to disk too, consistent with CPA.
-	}
+	// Disabled auth entries are persisted too, consistent with CPA.
 	if auth.Metadata == nil && auth.Storage == nil {
 		return true, nil
 	}
@@ -1728,15 +1724,6 @@ func (m *Manager) resolveFullRefreshAuth(ctx context.Context, auth *Auth) (*Auth
 	fullAuth.ID = uuid
 	fullAuth.Index = uuid
 	return fullAuth, true, nil
-}
-
-// executionModelCandidates handles an execution model candidates.
-func (m *Manager) executionModelCandidates(auth *Auth, routeModel string) []string {
-	resolved := m.resolveDispatchModel(auth, routeModel)
-	if strings.TrimSpace(resolved.Model) == "" {
-		return nil
-	}
-	return []string{resolved.Model}
 }
 
 // shouldRefresh reports whether should refresh.

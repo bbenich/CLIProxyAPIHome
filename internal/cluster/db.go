@@ -126,14 +126,14 @@ func AutoMigrateContext(ctx context.Context, db *gorm.DB) error {
 		return fmt.Errorf("database dialect is nil")
 	}
 	ctx = contextOrBackground(ctx)
-	if db.Dialector.Name() == "postgres" {
+	if db.Name() == "postgres" {
 		return autoMigratePostgresContext(ctx, db, false, nil)
 	}
 
 	startedAt := time.Now()
 	errMigrate := autoMigrate(db.WithContext(ctx))
 	fields := log.Fields{
-		"database_backend":   db.Dialector.Name(),
+		"database_backend":   db.Name(),
 		"migration_skipped":  false,
 		"migration_executor": true,
 		"migration_total_ms": time.Since(startedAt).Milliseconds(),
@@ -205,17 +205,17 @@ func autoMigrate(db *gorm.DB) error {
 
 func autoMigrateSchema(db *gorm.DB) error {
 	startedAt := time.Now()
-	isPostgres := db.Dialector.Name() == "postgres"
+	isPostgres := db.Name() == "postgres"
 	if errMigrate := db.AutoMigrate(databaseMigrationModels()...); errMigrate != nil {
 		log.WithFields(log.Fields{
-			"database_backend":            db.Dialector.Name(),
+			"database_backend":            db.Name(),
 			"migration_stage":             "gorm_auto_migrate",
 			"migration_stage_duration_ms": time.Since(startedAt).Milliseconds(),
 		}).WithError(errMigrate).Error("database migration stage failed")
 		return fmt.Errorf("gorm auto migrate: %w", errMigrate)
 	}
 	gormLog := log.WithFields(log.Fields{
-		"database_backend":            db.Dialector.Name(),
+		"database_backend":            db.Name(),
 		"migration_stage":             "gorm_auto_migrate",
 		"migration_stage_duration_ms": time.Since(startedAt).Milliseconds(),
 	})
@@ -228,7 +228,7 @@ func autoMigrateSchema(db *gorm.DB) error {
 }
 
 func runCustomMigrations(db *gorm.DB) error {
-	isPostgres := db.Dialector.Name() == "postgres"
+	isPostgres := db.Name() == "postgres"
 	migrations := []struct {
 		name string
 		run  func(*gorm.DB) error
@@ -252,14 +252,14 @@ func runCustomMigrations(db *gorm.DB) error {
 		stageStartedAt := time.Now()
 		if errMigrate := migration.run(db); errMigrate != nil {
 			log.WithFields(log.Fields{
-				"database_backend":            db.Dialector.Name(),
+				"database_backend":            db.Name(),
 				"migration_stage":             migration.name,
 				"migration_stage_duration_ms": time.Since(stageStartedAt).Milliseconds(),
 			}).WithError(errMigrate).Error("database migration stage failed")
 			return fmt.Errorf("%s: %w", migration.name, errMigrate)
 		}
 		stageLog := log.WithFields(log.Fields{
-			"database_backend":            db.Dialector.Name(),
+			"database_backend":            db.Name(),
 			"migration_stage":             migration.name,
 			"migration_stage_duration_ms": time.Since(stageStartedAt).Milliseconds(),
 		})
@@ -276,13 +276,13 @@ func migrateCPANodePrimaryKey(db *gorm.DB) error {
 	if db == nil {
 		return fmt.Errorf("database connection is nil")
 	}
-	switch db.Dialector.Name() {
+	switch db.Name() {
 	case "sqlite":
 		return migrateSQLiteCPANodePrimaryKey(db)
 	case "postgres":
 		return migratePostgresCPANodePrimaryKey(db)
 	default:
-		return fmt.Errorf("unsupported database dialect %q for cpa_node primary key migration", db.Dialector.Name())
+		return fmt.Errorf("unsupported database dialect %q for cpa_node primary key migration", db.Name())
 	}
 }
 
@@ -465,7 +465,7 @@ func runUsageDerivedColumnBackfillBatch(ctx context.Context, db *gorm.DB, batchS
 	}
 	result := UsageDerivedColumnBackfillResult{}
 	errTransaction := db.WithContext(contextOrBackground(ctx)).Transaction(func(tx *gorm.DB) error {
-		if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		if tx.Dialector != nil && tx.Name() == "postgres" {
 			var acquired bool
 			if errLock := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", usageDerivedColumnBackfillAdvisoryLockKey).Scan(&acquired).Error; errLock != nil {
 				return errLock
@@ -728,7 +728,7 @@ func runUsageCacheReadBackfillBatch(ctx context.Context, db *gorm.DB, batchSize 
 	}
 	result := UsageCacheReadBackfillResult{}
 	errTransaction := db.WithContext(contextOrBackground(ctx)).Transaction(func(tx *gorm.DB) error {
-		if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		if tx.Dialector != nil && tx.Name() == "postgres" {
 			var acquired bool
 			if errLock := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", usageCacheReadBackfillAdvisoryLockKey).Scan(&acquired).Error; errLock != nil {
 				return errLock

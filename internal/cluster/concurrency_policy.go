@@ -465,7 +465,7 @@ func verifyConcurrencyPolicyActivation(ctx context.Context, tx *gorm.DB, nodeHea
 			return ErrConcurrencyHomeCapabilityMissing
 		}
 	}
-	if tx.Dialector != nil && tx.Dialector.Name() == "sqlite" && len(homes) > 1 {
+	if tx.Dialector != nil && tx.Name() == "sqlite" && len(homes) > 1 {
 		return ErrConcurrencySQLiteMultiHome
 	}
 	return nil

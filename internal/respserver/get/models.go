@@ -1,7 +1,6 @@
 package get
 
 import (
-	"context"
 	"sort"
 	"strings"
 
@@ -10,26 +9,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPIHome/internal/respserver/dispatch"
 	"github.com/tidwall/sjson"
 )
-
-// handleModels handles a models.
-func handleModels(ctx context.Context, env dispatch.Env, args []string) dispatch.Reply {
-	// Normalize source data before building the derived payload.
-	_ = ctx
-
-	if len(args) != 2 {
-		return dispatch.Err("wrong number of arguments for 'get' command")
-	}
-
-	if env.Runtime == nil || env.Runtime.CoreManager() == nil {
-		return dispatch.Err("runtime not ready")
-	}
-
-	payload, errBuild := buildModelsJSON(env)
-	if errBuild != nil {
-		return dispatch.Err(errBuild.Error())
-	}
-	return dispatch.BulkString([]byte(payload))
-}
 
 // buildModelsJSON assembles the models payload grouped by provider bucket.
 // Authentication is the caller's responsibility.

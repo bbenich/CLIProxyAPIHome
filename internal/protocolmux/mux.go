@@ -28,9 +28,6 @@ func Serve(ctx context.Context, listener net.Listener, httpListener *Listener, o
 	if listener == nil {
 		return net.ErrClosed
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
 
 	for {
 		conn, errAccept := listener.Accept()

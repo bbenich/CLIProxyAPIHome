@@ -46,7 +46,7 @@ func runUsageTokenAccountingBackfillBatch(ctx context.Context, db *gorm.DB, batc
 	}
 	result := UsageTokenAccountingBackfillResult{}
 	errTransaction := db.WithContext(contextOrBackground(ctx)).Transaction(func(tx *gorm.DB) error {
-		if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		if tx.Dialector != nil && tx.Name() == "postgres" {
 			var acquired bool
 			if errLock := tx.Raw("SELECT pg_try_advisory_xact_lock(?)", usageTokenAccountingBackfillAdvisoryLockKey).Scan(&acquired).Error; errLock != nil {
 				return errLock

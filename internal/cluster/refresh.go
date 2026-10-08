@@ -166,8 +166,6 @@ func (c *RefreshController) RefreshNowObserved(ctx context.Context, authIndex, o
 			}
 			return nil, fmt.Errorf("cluster refresh forward to master: %w", errForward)
 		}
-	} else {
-		return nil, fmt.Errorf("cluster refresh master is unavailable")
 	}
 	return nil, fmt.Errorf("cluster refresh master is unavailable")
 }
@@ -249,7 +247,10 @@ func (c *RefreshController) applyForwardedRefreshFailureInMemory(ctx context.Con
 			lastError.HTTPStatus = http.StatusServiceUnavailable
 		}
 		lastError.Retryable = true
-		coreauth.ApplyRefreshFailureState(auth, lastError, now)
+		// The returned *Error is the normalized failure record that is already
+		// stored on auth.LastError/LastRefreshError; it does not signal that
+		// applying the state failed, so it is intentionally not used here.
+		_ = coreauth.ApplyRefreshFailureState(auth, lastError, now)
 	case "refresh_unsupported":
 		if strings.TrimSpace(lastError.Message) == "" {
 			lastError.Message = "token refresh is not supported for this provider"
@@ -594,7 +595,9 @@ func mergeClusterRefreshOutcome(current, base, refreshed *coreauth.Auth, errRefr
 		merged.NextRefreshAfter = refreshed.NextRefreshAfter
 		merged.LastRefreshError = refreshError
 	default:
-		coreauth.ApplyRefreshFailureState(merged, errRefresh, now)
+		// The returned *Error mirrors the failure record already stored on
+		// merged; it does not signal that applying the state failed.
+		_ = coreauth.ApplyRefreshFailureState(merged, errRefresh, now)
 		if !refreshed.NextRefreshAfter.IsZero() && (merged.NextRefreshAfter.IsZero() || refreshed.NextRefreshAfter.Before(merged.NextRefreshAfter)) {
 			merged.NextRefreshAfter = refreshed.NextRefreshAfter
 		}

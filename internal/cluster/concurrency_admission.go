@@ -121,7 +121,7 @@ func withConcurrencyTransaction(ctx context.Context, db *gorm.DB, fn func(*gorm.
 	if fn == nil {
 		return fmt.Errorf("concurrency transaction callback is nil")
 	}
-	if db.Dialector != nil && db.Dialector.Name() == "sqlite" {
+	if db.Dialector != nil && db.Name() == "sqlite" {
 		sqliteConcurrencyTransactionMu.Lock()
 		defer sqliteConcurrencyTransactionMu.Unlock()
 	}

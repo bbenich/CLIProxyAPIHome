@@ -375,39 +375,6 @@ func usageTokenBreakdownFromValues(quality string, total, inputTotal, uncachedIn
 	return newInconsistentUsageTokenBreakdown(total, 0)
 }
 
-func mergeUsageTokenBreakdowns(left UsageTokenBreakdown, right UsageTokenBreakdown) UsageTokenBreakdown {
-	if !left.Valid() {
-		left = newUnclassifiedUsageTokenBreakdown(0)
-	}
-	if !right.Valid() {
-		right = newInconsistentUsageTokenBreakdown(right.TotalTokens, 0)
-	}
-	quality := mergeUsageTokenAccountingQuality(left.Quality, left.UnclassifiedTokens, right.Quality, right.UnclassifiedTokens)
-	return usageTokenBreakdownFromValues(
-		quality,
-		left.TotalTokens+right.TotalTokens,
-		left.Input.TotalTokens+right.Input.TotalTokens,
-		left.Input.UncachedTokens+right.Input.UncachedTokens,
-		left.Input.CacheReadTokens+right.Input.CacheReadTokens,
-		left.Input.CacheWriteTokens+right.Input.CacheWriteTokens,
-		left.Output.TotalTokens+right.Output.TotalTokens,
-		left.Output.NonReasoningTokens+right.Output.NonReasoningTokens,
-		left.Output.ReasoningTokens+right.Output.ReasoningTokens,
-		left.UnclassifiedTokens+right.UnclassifiedTokens,
-	)
-}
-
-func mergeUsageTokenAccountingQuality(left string, leftUnclassified int64, right string, rightUnclassified int64) string {
-	if left == UsageTokenAccountingQualityInconsistent || right == UsageTokenAccountingQualityInconsistent {
-		return UsageTokenAccountingQualityInconsistent
-	}
-	if (left == UsageTokenAccountingQualityUnclassified && leftUnclassified > 0) ||
-		(right == UsageTokenAccountingQualityUnclassified && rightUnclassified > 0) {
-		return UsageTokenAccountingQualityUnclassified
-	}
-	return UsageTokenAccountingQualityComplete
-}
-
 func usageTokenBreakdownUpdates(breakdown UsageTokenBreakdown) map[string]any {
 	return map[string]any{
 		"token_accounting_version":      breakdown.SchemaVersion,

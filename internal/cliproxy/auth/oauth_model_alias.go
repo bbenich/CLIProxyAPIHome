@@ -90,16 +90,6 @@ func (m *Manager) SetOAuthModelAlias(aliases map[string][]internalconfig.OAuthMo
 	}
 }
 
-// applyOAuthModelAlias resolves the upstream model from OAuth model alias.
-// If an alias exists, the returned model is the upstream model.
-func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string {
-	upstreamModel := m.resolveOAuthUpstreamModel(auth, requestedModel)
-	if upstreamModel == "" {
-		return requestedModel
-	}
-	return upstreamModel
-}
-
 // modelAliasLookupCandidates handles a model alias lookup candidates.
 func modelAliasLookupCandidates(requestedModel string) (suffixResult, []string) {
 	requestedModel = strings.TrimSpace(requestedModel)
@@ -198,17 +188,6 @@ func resolveModelAliasFromConfigModels(requestedModel string, models []modelAlia
 		return resolved[0]
 	}
 	return ""
-}
-
-// resolveOAuthUpstreamModel resolves the upstream model name from OAuth model alias.
-// If an alias exists, returns the original (upstream) model name that corresponds
-// to the requested alias.
-//
-// If the requested model contains a thinking suffix (e.g., "gemini-2.5-pro(8192)"),
-// the suffix is preserved in the returned model name. However, if the alias's
-// original name already contains a suffix, the config suffix takes priority.
-func (m *Manager) resolveOAuthUpstreamModel(auth *Auth, requestedModel string) string {
-	return m.resolveOAuthModelAlias(auth, requestedModel).upstreamModel
 }
 
 func (m *Manager) resolveOAuthModelAlias(auth *Auth, requestedModel string) oauthModelAliasResult {

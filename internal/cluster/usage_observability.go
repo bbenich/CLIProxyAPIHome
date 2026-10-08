@@ -1297,7 +1297,7 @@ func usageObservabilityTrendBucketUnixSQL(db *gorm.DB, interval string, location
 		bucketSeconds = 604800
 		subtractSeconds = 4 * 86400
 	}
-	if db != nil && db.Dialector != nil && db.Dialector.Name() == "postgres" {
+	if db != nil && db.Dialector != nil && db.Name() == "postgres" {
 		datePart := "day"
 		switch interval {
 		case "minute":
@@ -1348,7 +1348,7 @@ func usageObservabilitySQLiteTrendBucketCaseSQL(interval string, location *time.
 	var builder strings.Builder
 	builder.WriteString("CASE")
 	for _, segment := range segments {
-		builder.WriteString(fmt.Sprintf(" WHEN %s >= %d AND %s < %d THEN %d", usageUnixExpr, segment.StartUnix, usageUnixExpr, segment.EndUnix, segment.BucketUnix))
+		fmt.Fprintf(&builder, " WHEN %s >= %d AND %s < %d THEN %d", usageUnixExpr, segment.StartUnix, usageUnixExpr, segment.EndUnix, segment.BucketUnix)
 	}
 	builder.WriteString(" ELSE ")
 	builder.WriteString(fallbackSQL)
@@ -1568,7 +1568,7 @@ func usageObservabilityBucketUnixSQL(db *gorm.DB, bucketSeconds int) (string, []
 	if bucketSeconds <= 0 {
 		bucketSeconds = 60
 	}
-	if db != nil && db.Dialector != nil && db.Dialector.Name() == "postgres" {
+	if db != nil && db.Dialector != nil && db.Name() == "postgres" {
 		return `CAST(FLOOR(EXTRACT(EPOCH FROM "usage"."timestamp") / ?) * ? AS BIGINT)`, []any{bucketSeconds, bucketSeconds}
 	}
 	return `CAST((CAST(strftime('%s', "usage"."timestamp") AS INTEGER) / ?) AS INTEGER) * ?`, []any{bucketSeconds, bucketSeconds}
@@ -2769,24 +2769,6 @@ func usageObservabilityRecordFromRow(row *usageObservabilityRecordRow) UsageObse
 	return record
 }
 
-func usageObservabilityAggregateItemsFromRows(rows []usageObservabilityRecordRow, groupBy string) []UsageObservabilityAggregateItem {
-	accumulators := make(map[string]*usageObservabilityAggregateAccumulator)
-	for index := range rows {
-		key, item := usageObservabilityAggregateIdentity(&rows[index], groupBy)
-		accumulator := accumulators[key]
-		if accumulator == nil {
-			accumulator = &usageObservabilityAggregateAccumulator{Item: item}
-			accumulators[key] = accumulator
-		}
-		accumulator.add(&rows[index])
-	}
-	items := make([]UsageObservabilityAggregateItem, 0, len(accumulators))
-	for _, accumulator := range accumulators {
-		items = append(items, accumulator.result())
-	}
-	return items
-}
-
 func usageObservabilityAggregateItemFromRow(row *usageObservabilityAggregateRow, groupBy string) UsageObservabilityAggregateItem {
 	if row == nil {
 		return UsageObservabilityAggregateItem{}
@@ -2955,228 +2937,6 @@ func usageObservabilityAggregateCredentialStatus(row *usageObservabilityAggregat
 	return ""
 }
 
-func usageObservabilityAggregateIdentity(row *usageObservabilityRecordRow, groupBy string) (string, UsageObservabilityAggregateItem) {
-	switch groupBy {
-	case "user":
-		id := usageObservabilityUintID(row.ClientUserID)
-		label := firstNonEmptyUsageObservabilityString(row.Username, id, "Unknown user")
-		return id, UsageObservabilityAggregateItem{
-			ID:    id,
-			Label: label,
-			Metadata: map[string]any{
-				"user_id":  optionalUintMapValue(row.ClientUserID),
-				"username": strings.TrimSpace(row.Username),
-			},
-		}
-	case "client_key":
-		id := usageObservabilityUintID(row.ClientAPIKeyID)
-		label := firstNonEmptyUsageObservabilityString(row.ClientAPIKeyLabel, row.ClientAPIKeyMasked, id, "Unknown client key")
-		return id, UsageObservabilityAggregateItem{
-			ID:    id,
-			Label: label,
-			Metadata: map[string]any{
-				"api_key_id":     optionalUintMapValue(row.ClientAPIKeyID),
-				"api_key_label":  strings.TrimSpace(row.ClientAPIKeyLabel),
-				"api_key_masked": firstNonEmptyUsageObservabilityString(row.ClientAPIKeyMasked, maskBillingAPIKey(row.RawAPIKey)),
-				"user_id":        optionalUintMapValue(row.ClientUserID),
-			},
-		}
-	case "credential":
-		credential := usageObservabilityCredential(row)
-		id := firstNonEmptyUsageObservabilityString(credential.CredentialID, "unknown")
-		label := firstNonEmptyUsageObservabilityString(credential.Label, credential.AuthIndex, id, "Unknown credential")
-		return id, UsageObservabilityAggregateItem{
-			ID:    id,
-			Label: label,
-			Metadata: map[string]any{
-				"credential_type": credential.CredentialType,
-				"provider":        credential.Provider,
-				"source":          credential.Source,
-				"status":          credential.Status,
-				"auth_index":      credential.AuthIndex,
-				"next_retry_at":   usageObservabilityOptionalTimeMapValue(credential.NextRetryAt),
-			},
-		}
-	case "model":
-		id := firstNonEmptyUsageObservabilityString(row.Model, "unknown")
-		return id, UsageObservabilityAggregateItem{
-			ID:    id,
-			Label: id,
-			Metadata: map[string]any{
-				"provider": strings.TrimSpace(row.Provider),
-			},
-		}
-	case "endpoint":
-		id := firstNonEmptyUsageObservabilityString(row.Endpoint, "unknown")
-		return id, UsageObservabilityAggregateItem{ID: id, Label: id, Metadata: map[string]any{}}
-	case "home_ip":
-		id := firstNonEmptyUsageObservabilityString(row.HomeIP, "unknown")
-		return id, UsageObservabilityAggregateItem{ID: id, Label: id, Metadata: map[string]any{}}
-	case "executor_type":
-		id := firstNonEmptyUsageObservabilityString(row.ExecutorType, "unknown")
-		return id, UsageObservabilityAggregateItem{ID: id, Label: id, Metadata: map[string]any{}}
-	case "status_code":
-		statusCode := usageObservabilityEffectiveStatusCode(row)
-		id := strconv.Itoa(statusCode)
-		return id, UsageObservabilityAggregateItem{
-			ID:    id,
-			Label: id,
-			Metadata: map[string]any{
-				"status": usageObservabilityRecordStatus(row.Failed),
-			},
-		}
-	default:
-		id := firstNonEmptyUsageObservabilityString(row.Provider, "unknown")
-		return id, UsageObservabilityAggregateItem{ID: id, Label: id, Metadata: map[string]any{}}
-	}
-}
-
-func usageObservabilityTotals(rows []usageObservabilityRecordRow) UsageObservabilityTotals {
-	accumulator := usageObservabilityAggregateAccumulator{}
-	userIDs := map[string]struct{}{}
-	clientKeyIDs := map[string]struct{}{}
-	credentialIDs := map[string]struct{}{}
-	models := map[string]struct{}{}
-	ttftValues := make([]int64, 0, len(rows))
-
-	for index := range rows {
-		row := &rows[index]
-		accumulator.add(row)
-		if id := usageObservabilityUintID(row.ClientUserID); id != "unknown" {
-			userIDs[id] = struct{}{}
-		}
-		if id := usageObservabilityUintID(row.ClientAPIKeyID); id != "unknown" {
-			clientKeyIDs[id] = struct{}{}
-		}
-		credential := usageObservabilityCredential(row)
-		if id := firstNonEmptyUsageObservabilityString(credential.CredentialID, "unknown"); id != "unknown" {
-			credentialIDs[id] = struct{}{}
-		}
-		if model := strings.TrimSpace(row.Model); model != "" {
-			models[model] = struct{}{}
-		}
-		if row.TTFTMS > 0 {
-			ttftValues = append(ttftValues, row.TTFTMS)
-		}
-	}
-
-	item := accumulator.result()
-	totals := UsageObservabilityTotals{
-		RequestCount:          item.RequestCount,
-		SuccessCount:          item.SuccessCount,
-		FailedCount:           item.FailedCount,
-		ErrorRate:             item.ErrorRate,
-		SuccessRate:           item.SuccessRate,
-		InputTokens:           item.InputTokens,
-		OutputTokens:          item.OutputTokens,
-		ReasoningTokens:       item.ReasoningTokens,
-		CachedTokens:          item.CachedTokens,
-		CacheReadTokens:       item.CacheReadTokens,
-		CacheCreationTokens:   item.CacheCreationTokens,
-		TotalTokens:           item.TotalTokens,
-		TokenBreakdown:        item.TokenBreakdown,
-		TotalAmount:           item.TotalAmount,
-		Currency:              item.Currency,
-		AvgLatencyMS:          item.AvgLatencyMS,
-		P95LatencyMS:          item.P95LatencyMS,
-		ActiveUserCount:       int64(len(userIDs)),
-		ActiveClientKeyCount:  int64(len(clientKeyIDs)),
-		ActiveCredentialCount: int64(len(credentialIDs)),
-		ActiveModelCount:      int64(len(models)),
-	}
-	if len(accumulator.LatencyValues) > 0 {
-		p50 := usageObservabilityPercentile(accumulator.LatencyValues, 0.50)
-		totals.P50LatencyMS = &p50
-	}
-	if len(ttftValues) > 0 {
-		var ttftTotal int64
-		for _, value := range ttftValues {
-			ttftTotal += value
-		}
-		avgTTFT := float64(ttftTotal) / float64(len(ttftValues))
-		totals.AvgTTFTMS = &avgTTFT
-	}
-	if totals.TotalAmount != nil && totals.TokenBreakdown.TotalTokens > 0 {
-		blended := *totals.TotalAmount * 1000000 / float64(totals.TokenBreakdown.TotalTokens)
-		totals.BlendedCostPer1M = &blended
-	}
-	return totals
-}
-
-func usageObservabilityLive(rows []usageObservabilityRecordRow, windowSeconds int) UsageObservabilityLiveSummary {
-	now := time.Now().UTC()
-	cutoff := now.Add(-time.Duration(windowSeconds) * time.Second)
-	windowRows := make([]usageObservabilityRecordRow, 0)
-	for _, row := range rows {
-		if !row.Timestamp.Before(cutoff) {
-			windowRows = append(windowRows, row)
-		}
-	}
-	totals := usageObservabilityTotals(windowRows)
-	live := UsageObservabilityLiveSummary{
-		WindowSeconds: windowSeconds,
-		ErrorRate:     totals.ErrorRate,
-		SuccessRate:   totals.SuccessRate,
-		P50LatencyMS:  totals.P50LatencyMS,
-		P95LatencyMS:  totals.P95LatencyMS,
-	}
-	if windowSeconds > 0 {
-		minutes := float64(windowSeconds) / 60
-		live.RPM = float64(totals.RequestCount) / minutes
-		live.TPM = float64(totals.TokenBreakdown.TotalTokens) / minutes
-	}
-	return live
-}
-
-func usageObservabilityTrend(rows []usageObservabilityRecordRow, interval string, location *time.Location) []UsageObservabilityTrendPoint {
-	type bucketAccumulator struct {
-		start       time.Time
-		end         time.Time
-		accumulator usageObservabilityAggregateAccumulator
-	}
-	if location == nil {
-		location = time.UTC
-	}
-	buckets := map[int64]*bucketAccumulator{}
-	for index := range rows {
-		row := &rows[index]
-		start, end := usageObservabilityBucketRange(row.Timestamp.UTC(), interval, location)
-		key := start.UnixNano()
-		bucket := buckets[key]
-		if bucket == nil {
-			bucket = &bucketAccumulator{start: start, end: end}
-			buckets[key] = bucket
-		}
-		bucket.accumulator.add(row)
-	}
-	points := make([]UsageObservabilityTrendPoint, 0, len(buckets))
-	for _, bucket := range buckets {
-		item := bucket.accumulator.result()
-		points = append(points, UsageObservabilityTrendPoint{
-			BucketStart:         bucket.start,
-			BucketEnd:           bucket.end,
-			RequestCount:        item.RequestCount,
-			SuccessCount:        item.SuccessCount,
-			FailedCount:         item.FailedCount,
-			InputTokens:         item.InputTokens,
-			OutputTokens:        item.OutputTokens,
-			ReasoningTokens:     item.ReasoningTokens,
-			CachedTokens:        item.CachedTokens,
-			CacheReadTokens:     item.CacheReadTokens,
-			CacheCreationTokens: item.CacheCreationTokens,
-			TotalTokens:         item.TotalTokens,
-			TokenBreakdown:      item.TokenBreakdown,
-			TotalAmount:         item.TotalAmount,
-			AvgLatencyMS:        item.AvgLatencyMS,
-			P95LatencyMS:        item.P95LatencyMS,
-		})
-	}
-	sort.Slice(points, func(i int, j int) bool {
-		return points[i].BucketStart.Before(points[j].BucketStart)
-	})
-	return points
-}
-
 func usageObservabilityActivity(trend []UsageObservabilityTrendPoint) []UsageObservabilityActivityPoint {
 	activity := make([]UsageObservabilityActivityPoint, 0, len(trend))
 	for _, point := range trend {
@@ -3198,111 +2958,6 @@ func usageObservabilityActivity(trend []UsageObservabilityTrendPoint) []UsageObs
 		})
 	}
 	return activity
-}
-
-func usageObservabilityTop(rows []usageObservabilityRecordRow) UsageObservabilityTopGroups {
-	return UsageObservabilityTopGroups{
-		Users:       usageObservabilityTopItems(rows, "user", "request_count", "desc", 10),
-		ClientKeys:  usageObservabilityTopItems(rows, "client_key", "request_count", "desc", 10),
-		Credentials: usageObservabilityTopItems(rows, "credential", "request_count", "desc", 10),
-		Providers:   usageObservabilityTopItems(rows, "provider", "request_count", "desc", 10),
-		Models:      usageObservabilityTopItems(rows, "model", "request_count", "desc", 10),
-		Endpoints:   usageObservabilityTopItems(rows, "endpoint", "request_count", "desc", 10),
-		Errors:      usageObservabilityTopItems(usageObservabilityFailedRows(rows), "status_code", "failed_count", "desc", 10),
-	}
-}
-
-func usageObservabilityTopItems(rows []usageObservabilityRecordRow, groupBy string, metric string, direction string, limit int) []UsageObservabilityAggregateItem {
-	items := usageObservabilityAggregateItemsFromRows(rows, groupBy)
-	sortUsageObservabilityAggregateItems(items, metric, direction)
-	if len(items) > limit {
-		return items[:limit]
-	}
-	return items
-}
-
-func usageObservabilityFailedRows(rows []usageObservabilityRecordRow) []usageObservabilityRecordRow {
-	out := make([]usageObservabilityRecordRow, 0)
-	for _, row := range rows {
-		if row.Failed {
-			out = append(out, row)
-		}
-	}
-	return out
-}
-
-func (a *usageObservabilityAggregateAccumulator) add(row *usageObservabilityRecordRow) {
-	a.Item.RequestCount++
-	if row.Failed {
-		a.Item.FailedCount++
-	} else {
-		a.Item.SuccessCount++
-	}
-	a.Item.InputTokens += row.InputTokens
-	a.Item.OutputTokens += row.OutputTokens
-	a.Item.ReasoningTokens += row.ReasoningTokens
-	a.Item.CachedTokens += row.CachedTokens
-	a.Item.CacheReadTokens += normalizedUsageCacheReadTokens(row.Provider, row.ExecutorType, row.CachedTokens, row.CacheReadTokens, row.CacheReadTokensPresent)
-	a.Item.CacheCreationTokens += row.CacheCreationTokens
-	a.Item.TotalTokens += row.TotalTokens
-	breakdown := usageTokenBreakdownFromObservabilityRow(row)
-	a.Item.TokenBreakdown = mergeUsageTokenBreakdowns(a.Item.TokenBreakdown, breakdown)
-	if row.TokenAccountingVersion == UsageTokenAccountingSchemaVersion {
-		a.CacheRateTokens += breakdown.Input.CacheReadTokens + breakdown.Input.CacheWriteTokens
-		a.CacheRateTotalTokens += breakdown.TotalTokens
-	} else {
-		a.CacheRateTokens += usageObservabilityCacheTokens(
-			normalizedUsageCacheReadTokens(row.Provider, row.ExecutorType, row.CachedTokens, row.CacheReadTokens, row.CacheReadTokensPresent),
-			row.CacheCreationTokens,
-		)
-		a.CacheRateTotalTokens += breakdown.TotalTokens
-	}
-	if row.Amount.Valid {
-		a.AmountTotal += row.Amount.Float64
-		a.AmountValid = true
-	}
-	if row.LatencyMS >= 0 {
-		a.LatencyValues = append(a.LatencyValues, row.LatencyMS)
-		a.LatencyTotal += row.LatencyMS
-	}
-	if a.Item.LastUsedAt == nil || row.Timestamp.After(*a.Item.LastUsedAt) {
-		timestamp := row.Timestamp.UTC()
-		a.Item.LastUsedAt = &timestamp
-	}
-}
-
-func usageTokenBreakdownFromObservabilityRow(row *usageObservabilityRecordRow) UsageTokenBreakdown {
-	if row == nil {
-		return newUnclassifiedUsageTokenBreakdown(0)
-	}
-	if row.TokenAccountingVersion == UsageTokenAccountingSchemaVersion {
-		return usageTokenBreakdownFromValues(
-			row.TokenAccountingQuality,
-			row.AccountingTotalTokens,
-			row.AccountingInputTokens,
-			row.UncachedInputTokens,
-			row.AccountingCacheReadTokens,
-			row.AccountingCacheWriteTokens,
-			row.AccountingOutputTokens,
-			row.NonReasoningOutputTokens,
-			row.AccountingReasoningTokens,
-			row.UnclassifiedTokens,
-		)
-	}
-	return usageTokenBreakdownFromLegacy(usageLegacyTokenCounters{
-		Provider:            row.Provider,
-		ExecutorType:        row.ExecutorType,
-		InputTokens:         row.InputTokens,
-		OutputTokens:        row.OutputTokens,
-		ReasoningTokens:     row.ReasoningTokens,
-		CacheReadTokens:     normalizedUsageCacheReadTokens(row.Provider, row.ExecutorType, row.CachedTokens, row.CacheReadTokens, row.CacheReadTokensPresent),
-		CacheCreationTokens: row.CacheCreationTokens,
-		TotalTokens:         row.TotalTokens,
-	})
-}
-
-func usageObservabilityCacheTokens(cacheReadTokens int64, cacheCreationTokens int64) int64 {
-	return cacheReadTokens + cacheCreationTokens
 }
 
 func (a *usageObservabilityAggregateAccumulator) result() UsageObservabilityAggregateItem {
@@ -3331,57 +2986,6 @@ func (a *usageObservabilityAggregateAccumulator) result() UsageObservabilityAggr
 	return item
 }
 
-func sortUsageObservabilityAggregateItems(items []UsageObservabilityAggregateItem, metric string, direction string) {
-	metric = strings.TrimSpace(metric)
-	if metric == "" {
-		metric = "request_count"
-	}
-	desc := strings.TrimSpace(direction) != "asc"
-	sort.SliceStable(items, func(i int, j int) bool {
-		left := usageObservabilityAggregateMetricValue(&items[i], metric)
-		right := usageObservabilityAggregateMetricValue(&items[j], metric)
-		if left == right {
-			if items[i].LastUsedAt != nil && items[j].LastUsedAt != nil && !items[i].LastUsedAt.Equal(*items[j].LastUsedAt) {
-				return items[i].LastUsedAt.After(*items[j].LastUsedAt)
-			}
-			return items[i].Label < items[j].Label
-		}
-		if desc {
-			return left > right
-		}
-		return left < right
-	})
-}
-
-func usageObservabilityAggregateMetricValue(item *UsageObservabilityAggregateItem, metric string) float64 {
-	if item == nil {
-		return 0
-	}
-	switch metric {
-	case "total_tokens":
-		return float64(item.TokenBreakdown.TotalTokens)
-	case "total_amount":
-		if item.TotalAmount == nil {
-			return 0
-		}
-		return *item.TotalAmount
-	case "failed_count":
-		return float64(item.FailedCount)
-	case "avg_latency_ms":
-		if item.AvgLatencyMS == nil {
-			return 0
-		}
-		return *item.AvgLatencyMS
-	case "p95_latency_ms":
-		if item.P95LatencyMS == nil {
-			return 0
-		}
-		return *item.P95LatencyMS
-	default:
-		return float64(item.RequestCount)
-	}
-}
-
 func usageObservabilityPercentile(values []int64, percentile float64) float64 {
 	if len(values) == 0 {
 		return 0
@@ -3398,11 +3002,6 @@ func usageObservabilityPercentile(values []int64, percentile float64) float64 {
 		index = len(sortedValues) - 1
 	}
 	return float64(sortedValues[index])
-}
-
-func usageObservabilityOverviewInterval(requested string, from *time.Time, to *time.Time, rows []usageObservabilityRecordRow) string {
-	start, end := usageObservabilityRangeBounds(from, to, rows)
-	return usageObservabilityOverviewIntervalFromTimes(requested, start, end)
 }
 
 func usageObservabilityOverviewIntervalFromBounds(requested string, from *time.Time, to *time.Time, bounds usageObservabilityOverviewBounds) string {
@@ -3515,27 +3114,6 @@ func usageObservabilityLastIncludedTime(start time.Time, end time.Time, endExclu
 	return end, true
 }
 
-func usageObservabilityRangeTime(value *time.Time, rows []usageObservabilityRecordRow, first bool) string {
-	start, end := usageObservabilityRangeBounds(nil, nil, rows)
-	if value != nil {
-		if first {
-			start = value.UTC()
-		} else {
-			end = value.UTC()
-		}
-	}
-	if first {
-		if start.IsZero() {
-			return ""
-		}
-		return start.UTC().Format(time.RFC3339Nano)
-	}
-	if end.IsZero() {
-		return ""
-	}
-	return end.UTC().Format(time.RFC3339Nano)
-}
-
 func usageObservabilityRangeTimeFromBounds(value *time.Time, bounds usageObservabilityOverviewBounds, first bool) string {
 	start, end := usageObservabilityBoundsTimes(bounds)
 	if value != nil {
@@ -3583,27 +3161,6 @@ func usageObservabilityLocation(timezone string) *time.Location {
 		return time.UTC
 	}
 	return location
-}
-
-func usageObservabilityRangeBounds(from *time.Time, to *time.Time, rows []usageObservabilityRecordRow) (time.Time, time.Time) {
-	var start time.Time
-	var end time.Time
-	if from != nil {
-		start = from.UTC()
-	}
-	if to != nil {
-		end = to.UTC()
-	}
-	for _, row := range rows {
-		timestamp := row.Timestamp.UTC()
-		if start.IsZero() || timestamp.Before(start) {
-			start = timestamp
-		}
-		if end.IsZero() || timestamp.After(end) {
-			end = timestamp
-		}
-	}
-	return start, end
 }
 
 func usageObservabilityBucketRange(timestamp time.Time, interval string, location *time.Location) (time.Time, time.Time) {
@@ -3820,20 +3377,6 @@ func normalizeOptionalUint(value *uint) *uint {
 		return nil
 	}
 	return value
-}
-
-func usageObservabilityUintID(value *uint) string {
-	if value == nil || *value == 0 {
-		return "unknown"
-	}
-	return strconv.FormatUint(uint64(*value), 10)
-}
-
-func optionalUintMapValue(value *uint) any {
-	if value == nil || *value == 0 {
-		return nil
-	}
-	return *value
 }
 
 func optionalSQLInt64MapValue(value sql.NullInt64) any {

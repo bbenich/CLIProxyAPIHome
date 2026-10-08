@@ -23,7 +23,7 @@ func (JSONB) GormDBDataType(db *gorm.DB, _ *schema.Field) string {
 	if db == nil || db.Dialector == nil {
 		return "text"
 	}
-	switch db.Dialector.Name() {
+	switch db.Name() {
 	case "postgres":
 		return "jsonb"
 	case "sqlite":

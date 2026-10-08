@@ -76,7 +76,7 @@ func TestSMTPSenderTreatsQuitFailureAfterAcceptedDataAsSuccess(t *testing.T) {
 		fromAddress: "no-reply@example.com",
 		fromName:    "CLIProxyAPIHome",
 	}
-	if errSend := sender.Send(nil, Message{
+	if errSend := sender.Send(context.Background(), Message{
 		To:      "alice@example.com",
 		Subject: "Accepted message",
 		Text:    "hello",

@@ -94,7 +94,7 @@ func (r *Repository) ReadInFlightObservation(ctx context.Context, staleAfter tim
 }
 
 func inFlightReadTransaction(db *gorm.DB) *gorm.DB {
-	if db != nil && db.Dialector != nil && db.Dialector.Name() == "postgres" {
+	if db != nil && db.Dialector != nil && db.Name() == "postgres" {
 		return db.Begin(&sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	}
 	return db.Begin()

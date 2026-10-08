@@ -109,18 +109,6 @@ func (h *Handler) refreshConfig(ctx context.Context) error {
 	return nil
 }
 
-func (h *Handler) publishCurrentConfig(ctx context.Context) error {
-	if h == nil || h.runtime == nil {
-		return nil
-	}
-	_, payload, errConfig := h.repo.LoadConfigAsRuntimeConfig(ctx)
-	if errConfig != nil {
-		return errConfig
-	}
-	h.runtime.PublishConfigYAML(payload)
-	return nil
-}
-
 // refreshAuths refreshes an auths.
 func (h *Handler) refreshAuths(ctx context.Context) error {
 	if h == nil || h.runtime == nil {

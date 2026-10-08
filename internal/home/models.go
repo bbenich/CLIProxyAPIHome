@@ -404,7 +404,6 @@ func (r *Runtime) registerModelsForAuth(a *coreauth.Auth) {
 					continue
 				}
 				if strings.EqualFold(compat.Name, compatName) {
-					isCompatAuth = true
 					ms := make([]*ModelInfo, 0, len(compat.Models))
 					for j := range compat.Models {
 						m := compat.Models[j]

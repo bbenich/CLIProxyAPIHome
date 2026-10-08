@@ -319,16 +319,16 @@ func testReadInFlightObservationCloseReopenDuringRead(t *testing.T, repo *Reposi
 		select {
 		case writerStart <- struct{}{}:
 		case <-ctx.Done():
-			db.AddError(ctx.Err())
+			_ = db.AddError(ctx.Err())
 			return
 		}
 		select {
 		case errWriter := <-writerDone:
 			if errWriter != nil {
-				db.AddError(errWriter)
+				_ = db.AddError(errWriter)
 			}
 		case <-ctx.Done():
-			db.AddError(ctx.Err())
+			_ = db.AddError(ctx.Err())
 		}
 	}); errRegister != nil {
 		t.Fatalf("register read barrier: %v", errRegister)

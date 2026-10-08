@@ -278,7 +278,7 @@ func TestGetInFlightDetailsFirstStablePageUsesCursorReadTimeForFreshness(t *test
 		for {
 			readAt, errReadAt := cluster.DatabaseNow(tx.Statement.Context, tx)
 			if errReadAt != nil {
-				tx.AddError(errReadAt)
+				_ = tx.AddError(errReadAt)
 				return
 			}
 			if readAt.After(freshUntil) {

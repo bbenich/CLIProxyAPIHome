@@ -61,7 +61,7 @@ func TestOAuthConfigUpsertAndSnapshotMutationSerializePostgres(t *testing.T) {
 				select {
 				case <-releaseRead:
 				case <-ctx.Done():
-					tx.AddError(ctx.Err())
+					_ = tx.AddError(ctx.Err())
 				}
 			}); errRegister != nil {
 				t.Fatal(errRegister)

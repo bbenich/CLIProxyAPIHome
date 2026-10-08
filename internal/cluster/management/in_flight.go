@@ -223,25 +223,6 @@ func parseInFlightPaginationValue(raw string, defaultValue int, minValue int, ma
 	return parsed, nil
 }
 
-func inFlightDetailsResponse(read cluster.InFlightObservationReadModel, query inFlightDetailsQuery) gin.H {
-	return inFlightDetailsResponseWithConcurrency(read, query, nil)
-}
-
-func inFlightDetailsResponseWithConcurrency(read cluster.InFlightObservationReadModel, query inFlightDetailsQuery, states []cluster.CredentialConcurrencyState) gin.H {
-	read = filterInFlightDetailsSnapshot(read, query)
-	states = filterInFlightDetailsStates(states, read)
-	total := len(read.Details)
-	start, nextOffset := inFlightDetailsPageBounds(total, query.Offset, query.Limit)
-	read = sliceInFlightDetailsSnapshot(read, start, nextOffset)
-	states = filterInFlightDetailsStates(states, read)
-	return inFlightDetailsPageResponse(inFlightDetailsSnapshot{
-		Read:       read,
-		States:     states,
-		Total:      total,
-		NextOffset: nextOffset,
-	})
-}
-
 func inFlightDetailsPageResponse(snapshot inFlightDetailsSnapshot) gin.H {
 	statesByCredential := make(map[string]cluster.CredentialConcurrencyState, len(snapshot.States))
 	for index := range snapshot.States {
@@ -354,10 +335,6 @@ func filterInFlightDetailsStates(states []cluster.CredentialConcurrencyState, re
 		}
 	}
 	return filtered
-}
-
-func inFlightSummaryResponse(read cluster.InFlightObservationReadModel) gin.H {
-	return inFlightSummaryResponseWithConcurrency(read, nil)
 }
 
 func inFlightSummaryResponseWithConcurrency(read cluster.InFlightObservationReadModel, states []cluster.CredentialConcurrencyState) gin.H {

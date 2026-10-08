@@ -310,7 +310,7 @@ func (r *Repository) MutateConfigSnapshot(ctx context.Context, nodeHeartbeatTime
 		}
 		// SQLite's activation-gate insert already holds the write lock. PostgreSQL
 		// also needs to serialize legacy config upserts, including newly added roots.
-		if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		if tx.Dialector != nil && tx.Name() == "postgres" {
 			if errLock := tx.Exec("LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE").Error; errLock != nil {
 				return errLock
 			}

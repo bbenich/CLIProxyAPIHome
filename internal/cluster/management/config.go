@@ -321,15 +321,6 @@ func rawConfigRootFromYAML(data []byte) (map[string]any, error) {
 	return appconfig.NormalizeConfigRoot(root)
 }
 
-// configRootFromYAML derives config root from yaml.
-func configRootFromYAML(data []byte) (map[string]any, error) {
-	root, errRoot := rawConfigRootFromYAML(data)
-	if errRoot != nil {
-		return nil, errRoot
-	}
-	return configRootWithoutCredentials(root), nil
-}
-
 // configRootWithoutCredentials returns the config roots persisted in config snapshot.
 func configRootWithoutCredentials(root map[string]any) map[string]any {
 	out := make(map[string]any, len(root))

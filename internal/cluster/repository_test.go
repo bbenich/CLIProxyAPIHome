@@ -522,6 +522,6 @@ func assertJSONBFullDataType(t *testing.T, db *gorm.DB, field *schema.Field, wan
 	expr := db.Migrator().FullDataTypeOf(field)
 	got := strings.ToLower(strings.TrimSpace(expr.SQL))
 	if !strings.Contains(got, want) {
-		t.Fatalf("%s JSONB data type = %q, want %q", db.Dialector.Name(), got, want)
+		t.Fatalf("%s JSONB data type = %q, want %q", db.Name(), got, want)
 	}
 }

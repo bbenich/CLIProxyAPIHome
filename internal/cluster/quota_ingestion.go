@@ -134,7 +134,7 @@ func upsertQuotaFromUsageRecord(ctx context.Context, db *gorm.DB, usage *UsageRe
 	return db.WithContext(contextOrBackground(ctx)).Transaction(func(tx *gorm.DB) error {
 		var record AuthRecord
 		query := tx.Where("uuid = ?", usage.QuotaCredentialID)
-		if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		if tx.Dialector != nil && tx.Name() == "postgres" {
 			query = query.Clauses(clause.Locking{Strength: "SHARE"})
 		}
 		errFind := query.First(&record).Error
@@ -244,7 +244,7 @@ func quotaSnapshotWriteFromUsagePayload(payload string, metadata UsageRuntimeMet
 	}
 	headers := make(http.Header)
 	for key, value := range headerResult.Map() {
-		headers.Set(http.CanonicalHeaderKey(key), value.String())
+		headers.Set(key, value.String())
 	}
 	observedAt, errTime := time.Parse(time.RFC3339Nano, strings.TrimSpace(gjson.Get(payload, "timestamp").String()))
 	if errTime != nil {

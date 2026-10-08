@@ -130,10 +130,10 @@ func blockPostgresPolicyModelReadForMutation(t *testing.T, ctx context.Context, 
 		select {
 		case errMutation := <-done:
 			if errMutation != nil {
-				db.AddError(errMutation)
+				_ = db.AddError(errMutation)
 			}
 		case <-ctx.Done():
-			db.AddError(ctx.Err())
+			_ = db.AddError(ctx.Err())
 		}
 	}); errRegister != nil {
 		t.Fatal(errRegister)

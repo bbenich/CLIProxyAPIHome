@@ -151,7 +151,7 @@ func TestRefreshAntigravityPreservesTransportAndReadErrors(t *testing.T) {
 				t.Fatalf("refreshAntigravity() error = %T/%v, want provider 503", errRefresh, errRefresh)
 			}
 
-			ApplyRefreshFailureState(auth, errRefresh, time.Now().UTC())
+			_ = ApplyRefreshFailureState(auth, errRefresh, time.Now().UTC())
 			if auth.LastError == nil || auth.LastError.Message != refreshTransientErrorMsg || !strings.Contains(auth.LastError.Diagnostic, "stage="+tc.stage) || !strings.Contains(auth.LastError.Diagnostic, "retry_at=") {
 				t.Fatalf("persisted refresh error = %#v, want generic message and safe stage diagnostic", auth.LastError)
 			}
@@ -173,7 +173,7 @@ func TestApplyRefreshFailureStateRedactsPersistedTransportDiagnostic(t *testing.
 		errors.New(`Post "https://proxy-user:proxy-password@oauth.example/token?access_token=query-secret": access token: access-secret connection refused`),
 	)
 	auth := &Auth{ID: "auth-1", Provider: "antigravity", Status: StatusActive}
-	ApplyRefreshFailureState(auth, errRefresh, time.Now().UTC())
+	_ = ApplyRefreshFailureState(auth, errRefresh, time.Now().UTC())
 
 	if auth.LastError == nil || !strings.Contains(auth.LastError.Diagnostic, "stage=transport") || !strings.Contains(auth.LastError.Diagnostic, "connection_refused") {
 		t.Fatalf("persisted diagnostic = %#v, want transport failure detail", auth.LastError)
@@ -192,7 +192,7 @@ func TestApplyRefreshFailureStateDoesNotPersistUnknownErrorText(t *testing.T) {
 	t.Parallel()
 
 	auth := &Auth{ID: "auth-1", Provider: "antigravity", Status: StatusActive}
-	ApplyRefreshFailureState(auth, errors.New("provider failed with unlabeled-secret"), time.Now().UTC())
+	_ = ApplyRefreshFailureState(auth, errors.New("provider failed with unlabeled-secret"), time.Now().UTC())
 
 	if auth.LastError == nil || !strings.Contains(auth.LastError.Diagnostic, "error_type=") {
 		t.Fatalf("persisted diagnostic = %#v, want safe error type", auth.LastError)
@@ -239,7 +239,7 @@ func TestApplyRefreshFailureStateUsesGenericTerminalErrorForUnstructuredFailure(
 	now := time.Now().UTC()
 	providerErr := errors.New(`oauth refresh failed: invalid_grant refresh_token=provider-secret`)
 
-	ApplyRefreshFailureState(auth, providerErr, now)
+	_ = ApplyRefreshFailureState(auth, providerErr, now)
 
 	if !auth.Disabled || !auth.Unavailable || auth.Status != StatusDisabled {
 		t.Fatalf("terminal auth state = %#v, want disabled and unavailable", auth)
@@ -269,7 +269,7 @@ func TestApplyRefreshFailureStatePreservesTerminalUpstreamResponse(t *testing.T)
 	}`)
 	errRefresh := antigravityOAuthRefreshError(http.StatusBadRequest, body)
 
-	ApplyRefreshFailureState(auth, errRefresh, now)
+	_ = ApplyRefreshFailureState(auth, errRefresh, now)
 
 	if !auth.Disabled || auth.LastError == nil || auth.LastError.Code != refreshAuthErrorCode {
 		t.Fatalf("terminal refresh state = %#v, want disabled auth", auth)
@@ -1101,7 +1101,7 @@ func TestApplyRefreshFailureStateKeepsSafeAntigravityTokenDispatchable(t *testin
 				},
 			}
 
-			ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
+			_ = ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
 
 			wantRefreshAt := now.Add(test.retryAfter)
 			if auth.Disabled || auth.Unavailable || auth.RuntimeRefreshBlocked || auth.Status != StatusActive {
@@ -1151,7 +1151,7 @@ func TestExecutionResultsPreserveNonBlockingRefreshDiagnostic(t *testing.T) {
 				HTTPStatus: http.StatusServiceUnavailable,
 				Upstream:   &UpstreamResponse{Status: http.StatusServiceUnavailable, Body: body},
 			}
-			ApplyRefreshFailureState(auth, errRefresh, now)
+			_ = ApplyRefreshFailureState(auth, errRefresh, now)
 			NewManager(nil, nil, nil).applyResultTransition(auth, test.result, test.result.Model, now.Add(time.Second), false)
 
 			if auth.LastRefreshError == nil || auth.LastRefreshError.Code != refreshTransientErrorCode || auth.LastRefreshError.Diagnostic == "" || auth.LastRefreshError.Upstream == nil || string(auth.LastRefreshError.Upstream.Body) != string(body) {
@@ -1218,7 +1218,7 @@ func TestApplyRefreshFailureStateBlocksKnownUnauthorizedAntigravityToken(t *test
 			if CanUseObservedTokenAfterRefreshFailure(auth, observedHash, refreshErr, now) {
 				t.Fatal("known unauthorized token was accepted after refresh failure")
 			}
-			ApplyRefreshFailureState(auth, refreshErr, now)
+			_ = ApplyRefreshFailureState(auth, refreshErr, now)
 
 			if !auth.Unavailable || !auth.RuntimeRefreshBlocked || !RefreshBlocksDispatch(auth) {
 				t.Fatalf("known unauthorized token remained dispatchable after refresh failure: %#v", auth)
@@ -1259,7 +1259,7 @@ func TestApplyRefreshFailureStateClearsOnlyRefreshOwnedCredentialState(t *testin
 	t.Run("restores credential quota after refresh error overlay", func(t *testing.T) {
 		auth := newBlockedAuth()
 
-		ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
+		_ = ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
 
 		if auth.RuntimeRefreshBlocked || RefreshBlocksDispatch(auth) {
 			t.Fatalf("refresh-owned block was not cleared: %#v", auth)
@@ -1290,7 +1290,7 @@ func TestApplyRefreshFailureStateClearsOnlyRefreshOwnedCredentialState(t *testin
 			},
 		}
 
-		ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
+		_ = ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
 
 		if auth.LastError == nil || auth.LastError.Code != "quota_exhausted" || auth.LastError.Diagnostic != "provider quota window is open" || auth.LastError.Upstream == nil || string(auth.LastError.Upstream.Body) != `{"error":"quota_exhausted"}` {
 			t.Fatalf("non-refresh credential error was not preserved: %#v", auth.LastError)
@@ -1359,7 +1359,7 @@ func TestApplyRefreshFailureStateBlocksAntigravityWithoutAccessToken(t *testing.
 		},
 	}
 
-	ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
+	_ = ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
 
 	if !auth.Unavailable || !auth.RuntimeRefreshBlocked || !RefreshBlocksDispatch(auth) {
 		t.Fatalf("Antigravity credential without an access token remained dispatchable: %#v", auth)
@@ -1380,7 +1380,7 @@ func TestApplyRefreshFailureStateBlocksAntigravityInsideSafetyWindow(t *testing.
 		},
 	}
 
-	ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
+	_ = ApplyRefreshFailureState(auth, errors.New("proxy connection refused"), now)
 
 	if !auth.Unavailable || !auth.RuntimeRefreshBlocked || auth.Status != StatusError {
 		t.Fatalf("Antigravity token inside the safety window remained dispatchable: %#v", auth)
@@ -1401,7 +1401,7 @@ func TestApplyRefreshFailureStateBlocksTransientFailuresFromDispatch(t *testing.
 		t.Run(message, func(t *testing.T) {
 			auth := &Auth{ID: "auth-1", Provider: "antigravity", Status: StatusActive}
 			now := time.Now().UTC()
-			ApplyRefreshFailureState(auth, errors.New(message), now)
+			_ = ApplyRefreshFailureState(auth, errors.New(message), now)
 
 			if auth.Disabled || auth.Status == StatusDisabled {
 				t.Fatalf("transient refresh failure disabled auth: %#v", auth)
@@ -1436,7 +1436,7 @@ func TestApplyRefreshFailureStatePreservesTransientUpstreamResponse(t *testing.T
 	body := []byte("first line\r\nsecond line\n")
 	errRefresh := antigravityOAuthRefreshError(http.StatusBadRequest, body)
 
-	ApplyRefreshFailureState(auth, errRefresh, now)
+	_ = ApplyRefreshFailureState(auth, errRefresh, now)
 
 	if auth.LastError == nil || auth.LastError.Message != refreshTransientErrorMsg || auth.StatusMessage != refreshTransientErrorMsg {
 		t.Fatalf("refresh failure state = %#v, want generic scheduling message", auth)

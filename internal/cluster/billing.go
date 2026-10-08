@@ -1134,7 +1134,7 @@ func billingUserBalanceQueryScope(scope *gorm.DB, query BillingOverviewQuery) *g
 
 func billingDateExpression(db *gorm.DB, column string, timezone string, bounds billingTrendBounds) (string, []any) {
 	timezone, location := billingTimezoneLocation(timezone)
-	if db != nil && db.Dialector != nil && db.Dialector.Name() == "postgres" {
+	if db != nil && db.Dialector != nil && db.Name() == "postgres" {
 		return fmt.Sprintf("TO_CHAR(timezone(?, %s), 'YYYY-MM-DD')", column), []any{timezone}
 	}
 	start, end := billingTrendRange(bounds)
@@ -1159,7 +1159,7 @@ func billingDateExpression(db *gorm.DB, column string, timezone string, bounds b
 	builder.WriteString("CASE")
 	for _, segment := range segments {
 		date := time.Unix(segment.BucketUnix, 0).UTC().In(location).Format(time.DateOnly)
-		builder.WriteString(fmt.Sprintf(" WHEN %s >= %d AND %s < %d THEN '%s'", unixExpr, segment.StartUnix, unixExpr, segment.EndUnix, date))
+		fmt.Fprintf(&builder, " WHEN %s >= %d AND %s < %d THEN '%s'", unixExpr, segment.StartUnix, unixExpr, segment.EndUnix, date)
 	}
 	builder.WriteString(" ELSE ")
 	builder.WriteString(fallback)

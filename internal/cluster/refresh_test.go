@@ -873,7 +873,10 @@ func TestMergeClusterRefreshOutcomeTerminalFailureClearsPriorRefreshAndQuotaStat
 		Message:    "credential unauthorized",
 		HTTPStatus: http.StatusUnauthorized,
 	}
-	coreauth.ApplyRefreshFailureState(refreshed, terminalErr, now)
+	refreshFailure := coreauth.ApplyRefreshFailureState(refreshed, terminalErr, now)
+	if refreshFailure == nil || refreshFailure.Code != "authentication_error" {
+		t.Fatalf("ApplyRefreshFailureState() = %#v, want authentication_error failure", refreshFailure)
+	}
 
 	merged := mergeClusterRefreshOutcome(current, base, refreshed, terminalErr, now)
 

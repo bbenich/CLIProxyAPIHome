@@ -154,9 +154,7 @@ func sanitizeForFilename(url string) string {
 	if strings.Contains(path, "?") {
 		path = strings.Split(path, "?")[0]
 	}
-	if strings.HasPrefix(path, "/") {
-		path = path[1:]
-	}
+	path = strings.TrimPrefix(path, "/")
 
 	sanitized := strings.ReplaceAll(path, "/", "-")
 	sanitized = strings.ReplaceAll(sanitized, ":", "-")

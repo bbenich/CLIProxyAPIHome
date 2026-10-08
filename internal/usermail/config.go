@@ -39,10 +39,10 @@ func ResolveConfig(cfg *appconfig.Config) (ResolvedConfig, error) {
 	}
 	current := cfg.UserEmail
 	publicURL, errURL := url.Parse(strings.TrimSpace(current.PublicUserURL))
-	if errURL != nil || publicURL == nil || publicURL.IsAbs() == false || publicURL.Host == "" {
+	if errURL != nil || publicURL == nil || !publicURL.IsAbs() || publicURL.Host == "" {
 		return ResolvedConfig{}, fmt.Errorf("public user url must be absolute")
 	}
-	if publicURL.Scheme != "https" && !(publicURL.Scheme == "http" && isLoopbackHost(publicURL.Hostname())) {
+	if publicURL.Scheme != "https" && (publicURL.Scheme != "http" || !isLoopbackHost(publicURL.Hostname())) {
 		return ResolvedConfig{}, fmt.Errorf("public user url must use https")
 	}
 	if publicURL.User != nil {

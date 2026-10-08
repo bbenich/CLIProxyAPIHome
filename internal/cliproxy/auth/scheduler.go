@@ -292,11 +292,6 @@ func (s *authScheduler) removeAuth(authID string) {
 	s.removeAuthLocked(authID)
 }
 
-// pickSingle returns the next auth for a single provider/model request using scheduler state.
-func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, opts Options, tried map[string]struct{}) (*Auth, error) {
-	return s.pickSingleWithStrategy(ctx, provider, model, opts, tried, schedulerStrategyCurrent)
-}
-
 func (s *authScheduler) pickSingleWithStrategy(ctx context.Context, provider, model string, opts Options, tried map[string]struct{}, strategy schedulerStrategy) (*Auth, error) {
 	// Build the candidate view before applying availability rules.
 	if s == nil {

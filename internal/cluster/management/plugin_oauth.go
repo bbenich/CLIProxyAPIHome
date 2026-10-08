@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	cpaauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-	sdkpluginhost "github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginhost"
 	"github.com/router-for-me/CLIProxyAPIHome/internal/cluster"
 	log "github.com/sirupsen/logrus"
 )
@@ -406,18 +405,6 @@ func pluginManagementConfigFields(fields []pluginapi.ConfigField) []pluginManage
 			Type:        pluginManagementString(string(field.Type)),
 			EnumValues:  pluginManagementStrings(field.EnumValues),
 			Description: pluginManagementString(field.Description),
-		})
-	}
-	return out
-}
-
-func pluginManagementMenus(menus []sdkpluginhost.RegisteredPluginMenu) []pluginManagementMenu {
-	out := make([]pluginManagementMenu, 0, len(menus))
-	for _, menu := range menus {
-		out = append(out, pluginManagementMenu{
-			Path:        pluginManagementString(menu.Path),
-			Menu:        pluginManagementString(menu.Menu),
-			Description: pluginManagementString(menu.Description),
 		})
 	}
 	return out

@@ -1757,9 +1757,10 @@ func TestSessionTreeDistinguishesCompactionFromFork(t *testing.T) {
 
 	var compactionNode, forkNode *SessionTreeNode
 	for _, child := range rootNode.Children {
-		if child.SessionID == "compacted-sess" {
+		switch child.SessionID {
+		case "compacted-sess":
 			compactionNode = child
-		} else if child.SessionID == "fork-sess" {
+		case "fork-sess":
 			forkNode = child
 		}
 	}

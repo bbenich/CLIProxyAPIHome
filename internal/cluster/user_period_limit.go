@@ -311,21 +311,6 @@ func remainingCredits(limit *float64, used float64) *float64 {
 	return &remaining
 }
 
-func periodDuration(id string) time.Duration {
-	switch id {
-	case PeriodWindow5h:
-		return periodLimit5hDuration
-	case PeriodWindow1d:
-		return periodLimit1dDuration
-	case PeriodWindow7d:
-		return periodLimit7dDuration
-	case PeriodWindow30d:
-		return periodLimit30dDuration
-	default:
-		return 0
-	}
-}
-
 func userWindowMode(user *UserRecord, id string) string {
 	if user == nil {
 		return DefaultPeriodWindowMode
@@ -341,42 +326,6 @@ func userWindowMode(user *UserRecord, id string) string {
 		return user.WindowMode30d
 	default:
 		return DefaultPeriodWindowMode
-	}
-}
-
-func userWindowStart(user *UserRecord, id string) *time.Time {
-	if user == nil {
-		return nil
-	}
-	switch id {
-	case PeriodWindow5h:
-		return user.PeriodWindowStart5h
-	case PeriodWindow1d:
-		return user.PeriodWindowStart1d
-	case PeriodWindow7d:
-		return user.PeriodWindowStart7d
-	case PeriodWindow30d:
-		return user.PeriodWindowStart30d
-	default:
-		return nil
-	}
-}
-
-func userUsageEpoch(user *UserRecord, id string) *time.Time {
-	if user == nil {
-		return nil
-	}
-	switch id {
-	case PeriodWindow5h:
-		return user.UsageEpoch5h
-	case PeriodWindow1d:
-		return user.UsageEpoch1d
-	case PeriodWindow7d:
-		return user.UsageEpoch7d
-	case PeriodWindow30d:
-		return user.UsageEpoch30d
-	default:
-		return nil
 	}
 }
 

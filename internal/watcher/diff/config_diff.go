@@ -547,27 +547,3 @@ func formatProxyURL(raw string) string {
 	}
 	return scheme + "://" + host
 }
-
-// equalStringSet handles an equal string set.
-func equalStringSet(a, b []string) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	aSet := make(map[string]struct{}, len(a))
-	for _, k := range a {
-		aSet[strings.TrimSpace(k)] = struct{}{}
-	}
-	bSet := make(map[string]struct{}, len(b))
-	for _, k := range b {
-		bSet[strings.TrimSpace(k)] = struct{}{}
-	}
-	if len(aSet) != len(bSet) {
-		return false
-	}
-	for k := range aSet {
-		if _, ok := bSet[k]; !ok {
-			return false
-		}
-	}
-	return true
-}

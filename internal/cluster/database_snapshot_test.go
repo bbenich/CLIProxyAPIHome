@@ -43,7 +43,7 @@ func TestDatabaseSnapshotModelRegistryMatchesMigrationModels(t *testing.T) {
 		seenNames[model.name] = struct{}{}
 
 		recordType := reflect.TypeOf(model.newRecord())
-		if recordType == nil || recordType.Kind() != reflect.Ptr {
+		if recordType == nil || recordType.Kind() != reflect.Pointer {
 			t.Fatalf("database model %s record type = %v", model.name, recordType)
 		}
 		if _, duplicate := seenTypes[recordType]; duplicate {
@@ -54,7 +54,7 @@ func TestDatabaseSnapshotModelRegistryMatchesMigrationModels(t *testing.T) {
 			t.Fatalf("migration model %d type = %v, snapshot type = %v", index, gotType, recordType)
 		}
 		batchType := reflect.TypeOf(model.newBatch())
-		if batchType == nil || batchType.Kind() != reflect.Ptr || batchType.Elem().Kind() != reflect.Slice || batchType.Elem().Elem() != recordType.Elem() {
+		if batchType == nil || batchType.Kind() != reflect.Pointer || batchType.Elem().Kind() != reflect.Slice || batchType.Elem().Elem() != recordType.Elem() {
 			t.Fatalf("database model %s batch type = %v, want pointer to slice of %v", model.name, batchType, recordType.Elem())
 		}
 		tableNamer, okTableNamer := model.newRecord().(interface{ TableName() string })

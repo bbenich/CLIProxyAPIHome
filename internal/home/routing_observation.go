@@ -116,9 +116,10 @@ func (r *Runtime) RoutingObservation(ctx context.Context) RoutingObservation {
 	for _, auth := range auths {
 		info := coreauth.DescribeRoutingCandidate(auth, now)
 		item := RoutingAccountObservation{CredentialID: auth.ID, Priority: info.Priority, Weight: info.Weight, ModelDependent: info.ModelDependent, Reason: "static-priority"}
-		if id == "weighted-round-robin" {
+		switch id {
+		case "weighted-round-robin":
 			item.Reason = "weighted-rotation"
-		} else if id == "round-robin" {
+		case "round-robin":
 			item.Reason = "rotation"
 		}
 		if info.Blocked != "" {

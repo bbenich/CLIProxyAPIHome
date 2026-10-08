@@ -254,7 +254,7 @@ func TestClassifyConnectionReturnsMembershipQueryError(t *testing.T) {
 	queryErr := errors.New("membership query failed")
 	if errCallback := repo.db.Callback().Query().Before("gorm:query").Register("test:classify_membership_query_error", func(tx *gorm.DB) {
 		if tx.Statement.Table == (CPANodeMembershipRecord{}).TableName() {
-			tx.AddError(queryErr)
+			_ = tx.AddError(queryErr)
 		}
 	}); errCallback != nil {
 		t.Fatal(errCallback)
@@ -272,7 +272,7 @@ func TestRecordParticipationReturnsMembershipQueryError(t *testing.T) {
 	queryErr := errors.New("membership query failed")
 	if errCallback := repo.db.Callback().Query().Before("gorm:query").Register("test:participation_membership_query_error", func(tx *gorm.DB) {
 		if tx.Statement.Table == (CPANodeMembershipRecord{}).TableName() {
-			tx.AddError(queryErr)
+			_ = tx.AddError(queryErr)
 		}
 	}); errCallback != nil {
 		t.Fatal(errCallback)
@@ -336,7 +336,7 @@ func TestRecordParticipationLocksMembershipBeforeInserting(t *testing.T) {
 			return
 		}
 		if _, locked := tx.Statement.Clauses["FOR"]; !locked {
-			tx.AddError(lockErr)
+			_ = tx.AddError(lockErr)
 			return
 		}
 		membershipLocked = true
@@ -345,7 +345,7 @@ func TestRecordParticipationLocksMembershipBeforeInserting(t *testing.T) {
 	}
 	if errCallback := repo.db.Callback().Create().Before("gorm:create").Register("test:participation_insert_after_membership_lock", func(tx *gorm.DB) {
 		if tx.Statement.Table == (CPANodeParticipationRecord{}).TableName() && !membershipLocked {
-			tx.AddError(lockErr)
+			_ = tx.AddError(lockErr)
 		}
 	}); errCallback != nil {
 		t.Fatal(errCallback)

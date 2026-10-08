@@ -825,10 +825,6 @@ func (r *Repository) AllowedDispatchIDsForAPIKey(ctx context.Context, apiKey str
 	return authIDs, modelIDs, nil
 }
 
-func ensureAPIKeyUserCreditsAvailable(ctx context.Context, db *gorm.DB, record *APIKeyRecord) error {
-	return ensureAPIKeyUserBillingAllowed(ctx, db, record)
-}
-
 // AllowedDispatchIDsForAPIKeyModel returns auth and model IDs after applying model-specific channel bindings.
 func (r *Repository) AllowedDispatchIDsForAPIKeyModel(ctx context.Context, apiKey string, modelID string) ([]string, []string, error) {
 	db, errDB := r.database()
@@ -1379,7 +1375,7 @@ func lockAPIKeyMutationTransaction(tx *gorm.DB) error {
 	if tx == nil {
 		return fmt.Errorf("database connection is nil")
 	}
-	if tx.Dialector == nil || tx.Dialector.Name() != "postgres" {
+	if tx.Dialector == nil || tx.Name() != "postgres" {
 		return nil
 	}
 	return tx.Exec("SELECT pg_advisory_xact_lock(?)", apiKeyMutationAdvisoryLockKey).Error
@@ -1389,7 +1385,7 @@ func lockAPIKeyReadTransaction(tx *gorm.DB) error {
 	if tx == nil {
 		return fmt.Errorf("database connection is nil")
 	}
-	if tx.Dialector == nil || tx.Dialector.Name() != "postgres" {
+	if tx.Dialector == nil || tx.Name() != "postgres" {
 		return nil
 	}
 	return tx.Exec("SELECT pg_advisory_xact_lock_shared(?)", apiKeyMutationAdvisoryLockKey).Error

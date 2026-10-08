@@ -362,7 +362,7 @@ func TestInFlightDatabaseFailureAfterPartDeleteRollsBackWatermark(t *testing.T) 
 	callbackName := "test:in-flight-fail-after-part-delete"
 	if errRegister := repo.db.Callback().Delete().After("gorm:delete").Register(callbackName, func(tx *gorm.DB) {
 		if tx.Statement.Table == (CPAInFlightSnapshotPartRecord{}).TableName() {
-			tx.AddError(injectedErr)
+			_ = tx.AddError(injectedErr)
 		}
 	}); errRegister != nil {
 		t.Fatalf("register delete callback error = %v", errRegister)

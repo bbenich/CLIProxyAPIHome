@@ -409,7 +409,7 @@ func (r *Repository) ListPendingQuiescence(ctx context.Context, home HomeIncarna
 		return nil, errDB
 	}
 	if strings.TrimSpace(home.IP) == "" || home.Port <= 0 || home.StartedAt.IsZero() {
-		return nil, fmt.Errorf("Home incarnation is required")
+		return nil, fmt.Errorf("home incarnation is required")
 	}
 	var rows []CPANodeQuiescenceRecord
 	errFind := db.WithContext(contextOrBackground(ctx)).Where("home_ip = ? AND home_port = ? AND home_started_at = ? AND status = ?", strings.TrimSpace(home.IP), home.Port, home.StartedAt, QuiescenceStatusPending).Order("updated_at ASC").Find(&rows).Error

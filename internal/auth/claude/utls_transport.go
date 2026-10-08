@@ -108,15 +108,19 @@ func (t *utlsRoundTripper) createConnection(ctx context.Context, host, addr stri
 	tlsConfig := &tls.Config{ServerName: host}
 	tlsConn := tls.UClient(conn, tlsConfig, tls.HelloChrome_Auto)
 
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		conn.Close()
-		return nil, err
+	if errHandshake := tlsConn.HandshakeContext(ctx); errHandshake != nil {
+		if errClose := conn.Close(); errClose != nil {
+			log.WithField("host", host).Debugf("failed to close connection after TLS handshake error: %v", errClose)
+		}
+		return nil, errHandshake
 	}
 
 	tr := &http2.Transport{}
 	h2Conn, err := tr.NewClientConn(tlsConn)
 	if err != nil {
-		tlsConn.Close()
+		if errClose := tlsConn.Close(); errClose != nil {
+			log.WithField("host", host).Debugf("failed to close TLS connection after HTTP/2 setup error: %v", errClose)
+		}
 		return nil, err
 	}
 

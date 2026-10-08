@@ -125,11 +125,6 @@ func parseCodexUsage(body []byte, observedAt time.Time) (codexUsageResult, error
 	}, nil
 }
 
-func parseCodexUsageWindows(body []byte, observedAt time.Time) ([]cluster.QuotaWindow, error) {
-	result, errParse := parseCodexUsage(body, observedAt)
-	return result.windows, errParse
-}
-
 func appendCodexProbeRateLimit(windows []cluster.QuotaWindow, limitIdentity string, label *string, scope string, scopeID *string, limit *codexRateLimit, priority int, observedAt time.Time) []cluster.QuotaWindow {
 	if limit == nil {
 		return windows

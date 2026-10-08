@@ -21,11 +21,11 @@ const (
 )
 
 var (
-	ErrConcurrencyHomeCapabilityRequired = errors.New("Home concurrency capability is required")
+	ErrConcurrencyHomeCapabilityRequired = errors.New("home concurrency capability is required")
 	ErrConcurrencySQLiteMultiHome        = errors.New("active concurrency limits require a single SQLite Home")
-	ErrHomeIncarnationFenced             = errors.New("Home incarnation is fenced")
-	ErrHomeIncarnationNotFound           = errors.New("Home incarnation not found")
-	ErrHomeIncarnationInactive           = errors.New("Home incarnation is not active")
+	ErrHomeIncarnationFenced             = errors.New("home incarnation is fenced")
+	ErrHomeIncarnationNotFound           = errors.New("home incarnation not found")
+	ErrHomeIncarnationInactive           = errors.New("home incarnation is not active")
 )
 
 // HomeIncarnationID identifies one append-only Home process incarnation.
@@ -45,10 +45,10 @@ func (r *Repository) RegisterHomeIncarnation(ctx context.Context, ip string, por
 	}
 	ip = strings.TrimSpace(ip)
 	if ip == "" {
-		return HomeIncarnationID{}, fmt.Errorf("Home incarnation ip is required")
+		return HomeIncarnationID{}, fmt.Errorf("home incarnation ip is required")
 	}
 	if port <= 0 {
-		return HomeIncarnationID{}, fmt.Errorf("Home incarnation port must be greater than 0")
+		return HomeIncarnationID{}, fmt.Errorf("home incarnation port must be greater than 0")
 	}
 
 	var id HomeIncarnationID
@@ -75,7 +75,7 @@ func (r *Repository) RegisterHomeIncarnation(ctx context.Context, ip string, por
 		if gate.ActivePolicyCount > 0 && !slices.Contains(capabilities, credentialConcurrencyLimitsCapability) {
 			return ErrConcurrencyHomeCapabilityRequired
 		}
-		if gate.ActivePolicyCount > 0 && tx.Dialector != nil && tx.Dialector.Name() == "sqlite" {
+		if gate.ActivePolicyCount > 0 && tx.Dialector != nil && tx.Name() == "sqlite" {
 			var liveHomes int64
 			if errCount := tx.Model(&HomeProcessIncarnationRecord{}).Where("state = ?", HomeIncarnationActive).Count(&liveHomes).Error; errCount != nil {
 				return errCount
@@ -194,7 +194,7 @@ func homeIncarnationLifecycleConfig(tx *gorm.DB) (LifecycleConfigRecord, error) 
 
 func (r *Repository) updateHomeIncarnation(ctx context.Context, id HomeIncarnationID, update func(*gorm.DB, *HomeProcessIncarnationRecord, time.Time) error) error {
 	if update == nil {
-		return fmt.Errorf("Home incarnation update is required")
+		return fmt.Errorf("home incarnation update is required")
 	}
 	db, errDB := r.database()
 	if errDB != nil {

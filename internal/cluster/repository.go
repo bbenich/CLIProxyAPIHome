@@ -69,7 +69,7 @@ func (r *Repository) DialectName() string {
 	if errDB != nil || db.Dialector == nil {
 		return ""
 	}
-	return db.Dialector.Name()
+	return db.Name()
 }
 
 // AuthToRecord converts auth to record.
@@ -190,7 +190,7 @@ func (r *Repository) upsertAuthWithResult(ctx context.Context, auth *coreauth.Au
 	errTransaction := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		existing := AuthRecord{}
 		query := tx.Unscoped().Where("uuid = ?", record.UUID)
-		if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		if tx.Dialector != nil && tx.Name() == "postgres" {
 			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
 		}
 		errFirst := query.First(&existing).Error
@@ -340,7 +340,7 @@ func (r *Repository) WithAuthRefreshLock(ctx context.Context, uuid string, fn fu
 	errTransaction := db.WithContext(contextOrBackground(ctx)).Transaction(func(txDB *gorm.DB) error {
 		record := &AuthRecord{}
 		query := txDB.Where("uuid = ?", uuid)
-		if txDB.Dialector != nil && txDB.Dialector.Name() == "sqlite" {
+		if txDB.Dialector != nil && txDB.Name() == "sqlite" {
 			if errLock := txDB.Exec(`UPDATE "auth" SET "version" = "version" WHERE "uuid" = ?`, uuid).Error; errLock != nil {
 				return errLock
 			}
@@ -599,7 +599,7 @@ func (r *Repository) replaceCPANodeSnapshot(ctx context.Context, home HomeIncarn
 		return fmt.Errorf("home port must be greater than 0")
 	}
 	if requireActiveIncarnation && home.StartedAt.IsZero() {
-		return fmt.Errorf("Home incarnation is required")
+		return fmt.Errorf("home incarnation is required")
 	}
 	if seenAt.IsZero() {
 		seenAt = time.Now().UTC()
@@ -797,7 +797,7 @@ func (r *Repository) SoftDeleteAuthWithVersion(ctx context.Context, uuid string)
 	errTransaction := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		record := AuthRecord{}
 		query := tx.Where("uuid = ?", uuid)
-		if tx.Dialector != nil && tx.Dialector.Name() == "postgres" {
+		if tx.Dialector != nil && tx.Name() == "postgres" {
 			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
 		}
 		if errFirst := query.First(&record).Error; errFirst != nil {
@@ -1078,7 +1078,7 @@ func (r *Repository) UpsertConfigValueWithResult(ctx context.Context, key string
 		if appconfig.IsOAuthProviderRoot(key) {
 			// SQLite needs a write lock before the read so another connection cannot
 			// commit a snapshot while this transaction retains an older OAuth view.
-			if tx.Dialector != nil && tx.Dialector.Name() == "sqlite" {
+			if tx.Dialector != nil && tx.Name() == "sqlite" {
 				if _, errGate := lockConcurrencyActivationGate(tx); errGate != nil {
 					return errGate
 				}
@@ -1414,7 +1414,7 @@ func lockClusterEventTransaction(db *gorm.DB) error {
 	if db == nil {
 		return fmt.Errorf("database connection is nil")
 	}
-	if db.Dialector == nil || db.Dialector.Name() != "postgres" {
+	if db.Dialector == nil || db.Name() != "postgres" {
 		return nil
 	}
 	// Keep event ID allocation serialized until commit so watchers cannot skip a later-committing lower ID.

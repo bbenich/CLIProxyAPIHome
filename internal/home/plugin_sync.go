@@ -504,21 +504,6 @@ func pluginCandidateDirs(root string, goos string, goarch string) []string {
 	return dirs
 }
 
-func pluginIDFromPath(path string) string {
-	file, okFile := pluginFileInfoFromPath(path, "")
-	if okFile {
-		return file.ID
-	}
-	base := filepath.Base(path)
-	lowerBase := strings.ToLower(base)
-	for _, extension := range []string{".so", ".dylib", ".dll"} {
-		if strings.HasSuffix(lowerBase, extension) {
-			return base[:len(base)-len(extension)]
-		}
-	}
-	return base
-}
-
 func pluginFileInfoFromPath(filePath string, requiredExtension string) (pluginFileInfo, bool) {
 	base := filepath.Base(filePath)
 	lowerBase := strings.ToLower(base)

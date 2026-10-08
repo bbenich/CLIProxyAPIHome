@@ -94,7 +94,7 @@ func (r *Repository) SubscribeMembership(ctx context.Context, request SubscribeM
 		return CPANodeMembershipRecord{}, fmt.Errorf("CPA node ID is required")
 	}
 	if request.Home.IP == "" || request.Home.Port <= 0 || request.Home.StartedAt.IsZero() {
-		return CPANodeMembershipRecord{}, fmt.Errorf("Home incarnation is required")
+		return CPANodeMembershipRecord{}, fmt.Errorf("home incarnation is required")
 	}
 	if request.ProtocolVersion != 0 && request.ProtocolVersion != 1 {
 		return CPANodeMembershipRecord{}, fmt.Errorf("unsupported membership protocol version %d", request.ProtocolVersion)

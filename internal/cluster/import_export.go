@@ -319,7 +319,7 @@ func ExportLocalState(ctx context.Context, opts ExportOptions) (ExportStats, err
 
 // readOnlyRepeatableReadTransaction starts one consistent read snapshot for PostgreSQL and SQLite.
 func readOnlyRepeatableReadTransaction(ctx context.Context, db *gorm.DB) *gorm.DB {
-	if db != nil && db.Dialector != nil && db.Dialector.Name() == "postgres" {
+	if db != nil && db.Dialector != nil && db.Name() == "postgres" {
 		return db.WithContext(contextOrBackground(ctx)).Begin(&sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	}
 	return db.WithContext(contextOrBackground(ctx)).Begin()

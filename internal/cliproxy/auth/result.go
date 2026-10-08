@@ -103,7 +103,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	// A locally clean token-versioned success has no state to clear. Drop its
 	// transition rather than enqueue a stale row or read the database per success;
 	// cluster events reconcile any newer authoritative state.
-	if mutator == nil && !(stateMutatorAvailable && isTokenVersionedSuccessResult(result)) {
+	dropTokenVersionedSuccess := stateMutatorAvailable && isTokenVersionedSuccessResult(result)
+	if mutator == nil && !dropTokenVersionedSuccess {
 		transition = m.applyResultTransition(auth, result, resultModel, now, disableCooling)
 		if localOnlyDisabledQuota {
 			skipResultPersist = availabilityFingerprint(auth, resultModel) == localAvailabilityBefore

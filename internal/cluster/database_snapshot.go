@@ -601,7 +601,7 @@ func validateDatabaseSnapshotTable(ctx context.Context, entry *zip.File, model d
 
 func validateDatabaseSnapshotRecord(ctx context.Context, model databaseModel, modelSchema *schema.Schema, raw []byte, record any) error {
 	value := reflect.ValueOf(record)
-	if value.Kind() != reflect.Ptr || value.IsNil() {
+	if value.Kind() != reflect.Pointer || value.IsNil() {
 		return fmt.Errorf("database snapshot table %s record factory returned an invalid value", model.name)
 	}
 	value = value.Elem()
@@ -753,7 +753,7 @@ var snapshotJSONBType = reflect.TypeOf(JSONB(nil))
 
 func validateDatabaseSnapshotExportRecordEncoding(ctx context.Context, model databaseModel, modelSchema *schema.Schema, record any) error {
 	value := reflect.ValueOf(record)
-	if modelSchema == nil || value.Kind() != reflect.Ptr || value.IsNil() {
+	if modelSchema == nil || value.Kind() != reflect.Pointer || value.IsNil() {
 		return fmt.Errorf("database snapshot table %s export record is invalid", model.name)
 	}
 	value = value.Elem()
@@ -780,7 +780,7 @@ func validateSnapshotValueEncoding(value reflect.Value) error {
 	if !value.IsValid() {
 		return nil
 	}
-	for value.Kind() == reflect.Interface || value.Kind() == reflect.Ptr {
+	for value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			return nil
 		}
@@ -834,7 +834,7 @@ func validateSnapshotValueEncoding(value reflect.Value) error {
 
 func snapshotPostgresValueContainsNUL(value any) (bool, error) {
 	reflected := reflect.ValueOf(value)
-	for reflected.IsValid() && (reflected.Kind() == reflect.Interface || reflected.Kind() == reflect.Ptr) {
+	for reflected.IsValid() && (reflected.Kind() == reflect.Interface || reflected.Kind() == reflect.Pointer) {
 		if reflected.IsNil() {
 			return false, nil
 		}
@@ -934,7 +934,7 @@ func decodeSnapshotJSONUnicodeEscape(raw []byte, offset int) (uint16, bool) {
 
 func snapshotUnsignedValueExceedsPostgres(value any) bool {
 	reflected := reflect.ValueOf(value)
-	for reflected.IsValid() && (reflected.Kind() == reflect.Interface || reflected.Kind() == reflect.Ptr) {
+	for reflected.IsValid() && (reflected.Kind() == reflect.Interface || reflected.Kind() == reflect.Pointer) {
 		if reflected.IsNil() {
 			return false
 		}
@@ -980,7 +980,7 @@ func snapshotFiniteValue(value reflect.Value) bool {
 	if !value.IsValid() {
 		return true
 	}
-	for value.Kind() == reflect.Interface || value.Kind() == reflect.Ptr {
+	for value.Kind() == reflect.Interface || value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			return true
 		}
@@ -1039,7 +1039,7 @@ func normalizeSnapshotTimeValue(value reflect.Value) {
 	if !value.IsValid() {
 		return
 	}
-	if value.Kind() == reflect.Ptr {
+	if value.Kind() == reflect.Pointer {
 		if value.IsNil() {
 			return
 		}
@@ -1208,7 +1208,7 @@ func importDatabaseSnapshotTable(ctx context.Context, tx *gorm.DB, entry *zip.Fi
 	lineReader := bufio.NewReader(reader)
 	batch := model.newBatch()
 	batchValue := reflect.ValueOf(batch)
-	if batchValue.Kind() != reflect.Ptr || batchValue.Elem().Kind() != reflect.Slice {
+	if batchValue.Kind() != reflect.Pointer || batchValue.Elem().Kind() != reflect.Slice {
 		return 0, 0, fmt.Errorf("database snapshot table %s batch factory returned an invalid value", model.name)
 	}
 	modelSchema, errSchema := schema.Parse(model.newRecord(), &sync.Map{}, schema.NamingStrategy{})
@@ -1561,13 +1561,13 @@ func databaseBackendFromDB(db *gorm.DB) (DatabaseBackend, error) {
 	if db == nil || db.Dialector == nil {
 		return "", fmt.Errorf("database dialect is unavailable")
 	}
-	switch db.Dialector.Name() {
+	switch db.Name() {
 	case "sqlite":
 		return DatabaseBackendSQLite, nil
 	case "postgres":
 		return DatabaseBackendPostgres, nil
 	default:
-		return "", fmt.Errorf("unsupported database snapshot backend %q", db.Dialector.Name())
+		return "", fmt.Errorf("unsupported database snapshot backend %q", db.Name())
 	}
 }
 

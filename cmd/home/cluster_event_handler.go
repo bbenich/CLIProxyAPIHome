@@ -38,7 +38,7 @@ func handleCPAFenceEvent(ctx context.Context, event cluster.ClusterEventRecord, 
 	}
 	home, initialized := coordinator.HomeIncarnation()
 	if !initialized {
-		return fmt.Errorf("Home incarnation is not initialized")
+		return fmt.Errorf("home incarnation is not initialized")
 	}
 	return handleCPAFence(ctx, event, repo, home, server)
 }
