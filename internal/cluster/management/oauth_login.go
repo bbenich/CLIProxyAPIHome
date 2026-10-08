@@ -34,6 +34,9 @@ import (
 
 const (
 	maxOAuthStateLength = 128
+	// oauthCallbackMaxRequestBodySize bounds the unauthenticated callback body;
+	// real callbacks only carry state, code, error, provider and redirect_url.
+	oauthCallbackMaxRequestBodySize int64 = 64 << 10
 
 	anthropicAuthURL     = "https://claude.ai/oauth/authorize"
 	anthropicRedirectURI = "http://localhost:54545/callback"
@@ -379,9 +382,18 @@ func (h *Handler) handleOAuthCallback(c *gin.Context) {
 			req.Error = c.Query("error_description")
 		}
 		req.Provider = c.Query("provider")
-	} else if errBind := c.ShouldBindJSON(&req); errBind != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
-		return
+	} else {
+		// The callback is unauthenticated, so bound the body before decoding it.
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, oauthCallbackMaxRequestBodySize)
+		if errBind := c.ShouldBindJSON(&req); errBind != nil {
+			var maxBytesError *http.MaxBytesError
+			if errors.As(errBind, &maxBytesError) {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"status": "error", "error": "request body too large"})
+				return
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "invalid body"})
+			return
+		}
 	}
 
 	state := strings.TrimSpace(req.State)

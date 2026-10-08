@@ -668,6 +668,7 @@ func Build(configFilePath string, opts ...RouteOption) (*BuildResult, error) {
 	}
 
 	mgmt := engine.Group("/v0/management")
+	handlerConfig := newHandlerConfigSync(handler)
 
 	reg := defaultRoutes(handler)
 	for i := range opts {
@@ -678,14 +679,16 @@ func Build(configFilePath string, opts ...RouteOption) (*BuildResult, error) {
 	}
 	if clusterEnabled {
 		mgmt.Use(
+			requestBodyLimitMiddleware(managementMaxRequestBodyBytes),
 			withBuildInfoHeaders(),
-			clusterAvailabilityMiddleware(clusterOpt, handler),
+			clusterAvailabilityMiddleware(clusterOpt, handlerConfig),
 			handler.Middleware(),
 		)
 	} else {
 		mgmt.Use(
+			requestBodyLimitMiddleware(managementMaxRequestBodyBytes),
 			withBuildInfoHeaders(),
-			refreshAndAvailabilityMiddleware(configFilePath, handler, authManager, tokenStore),
+			refreshAndAvailabilityMiddleware(configFilePath, handlerConfig, authManager, tokenStore),
 			handler.Middleware(),
 		)
 	}
@@ -698,18 +701,18 @@ func Build(configFilePath string, opts ...RouteOption) (*BuildResult, error) {
 	managementV8Routes(reg, handler, clusterHandler).Register(v8)
 	// OAuth callbacks authenticate with their pending state, as in CPA V8.
 	callback := engine.Group("/v8/management/oauth")
-	callback.Use(withBuildInfoHeaders())
+	callback.Use(requestBodyLimitMiddleware(oauthCallbackMaxRequestBodyBytes), withBuildInfoHeaders())
 	if clusterEnabled {
-		callback.Use(clusterAvailabilityMiddleware(clusterOpt, handler))
+		callback.Use(clusterAvailabilityMiddleware(clusterOpt, handlerConfig))
 		callback.GET("/callback", clusterHandler.PostOAuthCallback)
 		callback.POST("/callback", clusterHandler.PostOAuthCallback)
 	} else {
-		callback.Use(refreshAndAvailabilityMiddleware(configFilePath, handler, authManager, tokenStore))
+		callback.Use(refreshAndAvailabilityMiddleware(configFilePath, handlerConfig, authManager, tokenStore))
 		callback.GET("/callback", handler.GetOAuthCallback)
 		callback.POST("/callback", handler.PostOAuthCallback)
 	}
 	if clusterEnabled && clusterHandler != nil {
-		engine.NoRoute(clusterManagementNoRoute(clusterOpt, handler, clusterHandler))
+		engine.NoRoute(clusterManagementNoRoute(clusterOpt, handler, handlerConfig, clusterHandler))
 	}
 
 	return &BuildResult{
@@ -761,7 +764,7 @@ func setBuildInfoHeaders(c *gin.Context) {
 	c.Writer.Header().Set("X-CPA-HOME-BUILD-DATE", buildinfo.BuildDate)
 }
 
-func clusterManagementNoRoute(opt *ClusterManagementOption, handler *cpasdkapi.Handler, clusterHandler *clustermanagement.Handler) gin.HandlerFunc {
+func clusterManagementNoRoute(opt *ClusterManagementOption, handler *cpasdkapi.Handler, handlerConfig *handlerConfigSync, clusterHandler *clustermanagement.Handler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if c == nil || c.Request == nil || c.Request.URL == nil {
 			if c != nil {
@@ -780,10 +783,7 @@ func clusterManagementNoRoute(opt *ClusterManagementOption, handler *cpasdkapi.H
 		}
 
 		setBuildInfoHeaders(c)
-		cfg := cpaConfigFromHomeConfig(opt.Runtime.Config())
-		if cfg == nil {
-			cfg = &cpaconfig.Config{}
-		}
+		cfg := handlerConfig.applyRuntimeConfig(opt.Runtime.Config())
 		envSecret, envSecretSet := os.LookupEnv("MANAGEMENT_PASSWORD")
 		hasSecret := strings.TrimSpace(cfg.RemoteManagement.SecretKey) != "" || (envSecretSet && strings.TrimSpace(envSecret) != "")
 		if !hasSecret {
@@ -791,7 +791,6 @@ func clusterManagementNoRoute(opt *ClusterManagementOption, handler *cpasdkapi.H
 			return
 		}
 		if handler != nil {
-			handler.SetConfig(cfg)
 			handler.Middleware()(c)
 			if c.IsAborted() {
 				return
@@ -806,7 +805,7 @@ func clusterManagementNoRoute(opt *ClusterManagementOption, handler *cpasdkapi.H
 }
 
 // refreshAndAvailabilityMiddleware refreshes an and availability middleware.
-func refreshAndAvailabilityMiddleware(configFilePath string, handler *cpasdkapi.Handler, authManager *cpacoreauth.Manager, tokenStore any) gin.HandlerFunc {
+func refreshAndAvailabilityMiddleware(configFilePath string, handlerConfig *handlerConfigSync, authManager *cpacoreauth.Manager, tokenStore any) gin.HandlerFunc {
 	// Resolve credential context before calling upstream OAuth services.
 	envSecret, envSecretSet := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
@@ -841,9 +840,7 @@ func refreshAndAvailabilityMiddleware(configFilePath string, handler *cpasdkapi.
 			return
 		}
 
-		if handler != nil {
-			handler.SetConfig(cfg)
-		}
+		handlerConfig.applyLoadedConfig(cfg)
 		if authManager != nil {
 			authManager.SetConfig(cfg)
 			authManager.SetOAuthModelAlias(cfg.OAuthModelAlias)
@@ -870,7 +867,7 @@ func refreshAndAvailabilityMiddleware(configFilePath string, handler *cpasdkapi.
 }
 
 // clusterAvailabilityMiddleware handles a cluster availability middleware.
-func clusterAvailabilityMiddleware(opt *ClusterManagementOption, handler *cpasdkapi.Handler) gin.HandlerFunc {
+func clusterAvailabilityMiddleware(opt *ClusterManagementOption, handlerConfig *handlerConfigSync) gin.HandlerFunc {
 	// Validate request inputs before mutating persisted state.
 	envSecret, envSecretSet := os.LookupEnv("MANAGEMENT_PASSWORD")
 	envSecret = strings.TrimSpace(envSecret)
@@ -884,17 +881,11 @@ func clusterAvailabilityMiddleware(opt *ClusterManagementOption, handler *cpasdk
 			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
-		cfg := cpaConfigFromHomeConfig(opt.Runtime.Config())
-		if cfg == nil {
-			cfg = &cpaconfig.Config{}
-		}
+		cfg := handlerConfig.applyRuntimeConfig(opt.Runtime.Config())
 		hasSecret := strings.TrimSpace(cfg.RemoteManagement.SecretKey) != "" || envManagementSecret
 		if !hasSecret {
 			c.AbortWithStatus(http.StatusNotFound)
 			return
-		}
-		if handler != nil {
-			handler.SetConfig(cfg)
 		}
 		c.Next()
 	}
