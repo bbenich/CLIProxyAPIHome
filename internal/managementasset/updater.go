@@ -34,7 +34,7 @@ const ManagementFileName = managementAssetName
 const UserFileName = userAssetName
 
 // PanelFileNames lists all embedded control panel assets.
-var PanelFileNames = []string{IndexFileName, ManagementFileName, UserFileName}
+var PanelFileNames = []string{"quota-dashboard.html", "console.html", IndexFileName, ManagementFileName, UserFileName}
 
 //go:embed all:static
 var embeddedStaticFS embed.FS
