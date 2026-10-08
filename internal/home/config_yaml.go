@@ -61,7 +61,10 @@ func (r *Runtime) ReadConfigYAMLContext(ctx context.Context) ([]byte, error) {
 	return filtered, nil
 }
 
-// SubscribeConfigYAML handles a subscribe config yaml.
+// SubscribeConfigYAML registers a config subscriber. PublishConfigYAML calls
+// subscribers synchronously on the publisher's goroutine, so a subscriber must
+// not block on I/O; network subscribers queue the payload and deliver it
+// asynchronously. A subscriber that returns an error is removed.
 func (r *Runtime) SubscribeConfigYAML(subscriber func(payload []byte) error) (unsubscribe func()) {
 	// Normalize source data before building the derived payload.
 	if r == nil || subscriber == nil {
@@ -87,7 +90,7 @@ func (r *Runtime) SubscribeConfigYAML(subscriber func(payload []byte) error) (un
 	}
 }
 
-// PublishConfigYAML handles a publish config yaml.
+// PublishConfigYAML sends the sanitized config to every subscriber.
 func (r *Runtime) PublishConfigYAML(payload []byte) {
 	// Normalize source data before building the derived payload.
 	if r == nil || len(payload) == 0 {

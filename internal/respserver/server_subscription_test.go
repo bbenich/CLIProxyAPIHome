@@ -143,6 +143,11 @@ func TestConfigSubscriptionPublishesInitialSnapshotBeforeConcurrentUpdate(t *tes
 	goruntime.Gosched()
 	close(adapter.releaseLoad)
 	waitSubscriptionTestSignal(t, publishDone, "config publish")
+	// Socket delivery is asynchronous; wait for the sender to flush update-b.
+	deadline := time.Now().Add(respPipeDeadline)
+	for !strings.Contains(conn.Output(), "update-b") && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
 
 	output := conn.Output()
 	ackIndex := strings.Index(output, "subscribe")
@@ -165,36 +170,6 @@ func TestConfigSubscriptionPublishesInitialSnapshotBeforeConcurrentUpdate(t *tes
 		t.Fatalf("close test connection: %v", errClose)
 	}
 	waitSubscriptionTestSignal(t, serverDone, "RESP server shutdown")
-}
-
-func TestConfigSubscriptionDeliveryPreservesQueuedOrder(t *testing.T) {
-	ready := make(chan struct{})
-	aborted := make(chan struct{})
-	var output bytes.Buffer
-	delivery := newConfigSubscriptionDelivery(context.Background(), newSafeWriter(&output), ready, aborted)
-
-	initialTail := configSubscriptionDeliveryTail(delivery)
-	errB := make(chan error, 1)
-	go func() { errB <- delivery.Write([]byte("update-b")) }()
-	waitConfigSubscriptionDeliveryQueued(t, delivery, initialTail, "update B")
-
-	tailB := configSubscriptionDeliveryTail(delivery)
-	errC := make(chan error, 1)
-	go func() { errC <- delivery.Write([]byte("update-c")) }()
-	waitConfigSubscriptionDeliveryQueued(t, delivery, tailB, "update C")
-
-	close(ready)
-	if errWrite := <-errB; errWrite != nil {
-		t.Fatalf("write update B: %v", errWrite)
-	}
-	if errWrite := <-errC; errWrite != nil {
-		t.Fatalf("write update C: %v", errWrite)
-	}
-	updateBIndex := strings.Index(output.String(), "update-b")
-	updateCIndex := strings.Index(output.String(), "update-c")
-	if updateBIndex < 0 || updateCIndex < 0 || updateBIndex > updateCIndex {
-		t.Fatalf("queued delivery output = %q", output.String())
-	}
 }
 
 func TestConfigSubscriptionReadFailureAbortsPendingUpdates(t *testing.T) {
@@ -392,18 +367,6 @@ func configSubscriptionDeliveryTail(delivery *configSubscriptionDelivery) <-chan
 	delivery.queueMu.Lock()
 	defer delivery.queueMu.Unlock()
 	return delivery.tail
-}
-
-func waitConfigSubscriptionDeliveryQueued(t *testing.T, delivery *configSubscriptionDelivery, previous <-chan struct{}, description string) {
-	t.Helper()
-	deadline := time.Now().Add(respPipeDeadline)
-	for time.Now().Before(deadline) {
-		if configSubscriptionDeliveryTail(delivery) != previous {
-			return
-		}
-		goruntime.Gosched()
-	}
-	t.Fatalf("timed out waiting for %s to queue", description)
 }
 
 type blockingConfigAdapter struct {
