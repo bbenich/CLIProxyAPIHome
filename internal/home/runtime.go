@@ -60,8 +60,10 @@ type Runtime struct {
 	clusterRefresh          func(context.Context, string, string) ([]byte, error)
 	originalStore           coreauth.Store
 
-	clusterUsageQueueMu sync.Mutex
-	clusterUsageQueue   *usagePayloadQueue
+	clusterUsageQueueMu      sync.Mutex
+	clusterUsageQueue        *usagePayloadQueue
+	clusterUsageWriterDone   chan struct{}
+	clusterUsageWriterCancel context.CancelFunc
 
 	cancel context.CancelFunc
 

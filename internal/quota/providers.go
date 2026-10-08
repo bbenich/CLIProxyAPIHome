@@ -521,8 +521,7 @@ func kimiLimitWindow(input kimiLimitItem, index int, observedAt time.Time) (clus
 	}
 	resetIn := firstNonNegativeFloat(flexFloatValue(input.ResetInSnake), flexFloatValue(input.ResetIn), flexFloatValue(input.TTL), kimiUsageResetSeconds(input.Detail))
 	if window.ResetAt == nil && resetIn != nil {
-		resetAt := observedAt.Add(time.Duration(*resetIn) * time.Second)
-		window.ResetAt = &resetAt
+		window.ResetAt = quotaResetAfterSeconds(observedAt, *resetIn)
 	}
 	normalizeWindowValues(&window)
 	return window, true
@@ -541,8 +540,7 @@ func kimiSummaryWindow(input *kimiUsageDetail, observedAt time.Time) (cluster.Qu
 	window.ResetAt = kimiUsageResetAt(input)
 	resetIn := kimiUsageResetSeconds(input)
 	if window.ResetAt == nil && resetIn != nil {
-		resetAt := observedAt.Add(time.Duration(*resetIn) * time.Second)
-		window.ResetAt = &resetAt
+		window.ResetAt = quotaResetAfterSeconds(observedAt, *resetIn)
 	}
 	normalizeWindowValues(&window)
 	return window, true
@@ -761,6 +759,20 @@ func firstFloat(values ...*float64) *float64 {
 		}
 	}
 	return nil
+}
+
+// maxQuotaResetHorizon bounds relative reset hints. It exceeds the longest
+// real provider window, so larger values are treated as invalid.
+const maxQuotaResetHorizon = 366 * 24 * time.Hour
+
+// quotaResetAfterSeconds converts a relative reset hint into an absolute time.
+// Out-of-range hints are dropped so they cannot overflow into the past.
+func quotaResetAfterSeconds(observedAt time.Time, seconds float64) *time.Time {
+	if math.IsNaN(seconds) || seconds < 0 || seconds > maxQuotaResetHorizon.Seconds() {
+		return nil
+	}
+	resetAt := observedAt.Add(time.Duration(seconds) * time.Second)
+	return &resetAt
 }
 
 func firstNonNegativeFloat(values ...*float64) *float64 {

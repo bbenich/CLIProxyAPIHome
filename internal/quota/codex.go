@@ -164,8 +164,7 @@ func codexProbeWindow(id string, label *string, scope string, scopeID *string, i
 		resetAt := time.Unix(*input.ResetAt, 0).UTC()
 		window.ResetAt = &resetAt
 	} else if input.ResetAfterSeconds != nil && *input.ResetAfterSeconds >= 0 {
-		resetAt := observedAt.UTC().Add(time.Duration(*input.ResetAfterSeconds) * time.Second)
-		window.ResetAt = &resetAt
+		window.ResetAt = quotaResetAfterSeconds(observedAt.UTC(), float64(*input.ResetAfterSeconds))
 	}
 	return window, true
 }

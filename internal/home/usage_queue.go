@@ -14,12 +14,17 @@ type usagePayloadItem struct {
 	receivedAt time.Time
 }
 
+// clusterUsageDrainTimeout bounds how long shutdown waits for queued usage
+// payloads to be persisted.
+var clusterUsageDrainTimeout = 5 * time.Second
+
 type usagePayloadQueue struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	items  []usagePayloadItem
-	head   int
-	closed bool
+	mu       sync.Mutex
+	cond     *sync.Cond
+	items    []usagePayloadItem
+	head     int
+	closed   bool
+	inFlight bool
 }
 
 func newUsagePayloadQueue() *usagePayloadQueue {
@@ -55,13 +60,16 @@ func (q *usagePayloadQueue) Pop() (usagePayloadItem, bool) {
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.inFlight = false
 	for q.head >= len(q.items) && !q.closed {
 		q.cond.Wait()
 	}
-	if q.closed {
+	// A closed queue still hands out its backlog so shutdown can drain it.
+	if q.head >= len(q.items) {
 		return usagePayloadItem{}, false
 	}
 
+	q.inFlight = true
 	item := q.items[q.head]
 	q.items[q.head] = usagePayloadItem{}
 	q.head++
@@ -69,6 +77,7 @@ func (q *usagePayloadQueue) Pop() (usagePayloadItem, bool) {
 	return item, true
 }
 
+// Close stops accepting new payloads. Already queued payloads remain poppable.
 func (q *usagePayloadQueue) Close() {
 	if q == nil {
 		return
@@ -76,10 +85,29 @@ func (q *usagePayloadQueue) Close() {
 
 	q.mu.Lock()
 	q.closed = true
-	q.items = nil
-	q.head = 0
 	q.cond.Broadcast()
 	q.mu.Unlock()
+}
+
+// Discard closes the queue, drops its backlog and returns how many payloads
+// were not persisted, including one still being written.
+func (q *usagePayloadQueue) Discard() int {
+	if q == nil {
+		return 0
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	dropped := len(q.items) - q.head
+	if q.inFlight {
+		dropped++
+	}
+	q.closed = true
+	q.items = nil
+	q.head = 0
+	q.inFlight = false
+	q.cond.Broadcast()
+	return dropped
 }
 
 func (q *usagePayloadQueue) compactLocked() {
@@ -110,14 +138,26 @@ func (r *Runtime) startClusterUsageWriter(ctx context.Context) {
 		r.clusterUsageQueueMu.Unlock()
 		return
 	}
+	// Writes outlive ctx so shutdown can drain the backlog; stopClusterUsageWriter
+	// bounds the drain and cancels writeCtx afterwards.
+	writeCtx, cancelWrite := context.WithCancel(context.WithoutCancel(ctx))
+	done := make(chan struct{})
 	r.clusterUsageQueue = queue
+	r.clusterUsageWriterDone = done
+	r.clusterUsageWriterCancel = cancelWrite
 	r.clusterUsageQueueMu.Unlock()
 
 	go func() {
-		<-ctx.Done()
-		queue.Close()
+		select {
+		case <-ctx.Done():
+			queue.Close()
+		case <-done:
+		}
 	}()
-	go r.runClusterUsageWriter(ctx, store, queue)
+	go func() {
+		defer close(done)
+		r.runClusterUsageWriter(writeCtx, store, queue)
+	}()
 }
 
 func (r *Runtime) stopClusterUsageWriter() {
@@ -127,10 +167,29 @@ func (r *Runtime) stopClusterUsageWriter() {
 
 	r.clusterUsageQueueMu.Lock()
 	queue := r.clusterUsageQueue
+	done := r.clusterUsageWriterDone
+	cancelWrite := r.clusterUsageWriterCancel
 	r.clusterUsageQueue = nil
+	r.clusterUsageWriterDone = nil
+	r.clusterUsageWriterCancel = nil
 	r.clusterUsageQueueMu.Unlock()
-	if queue != nil {
-		queue.Close()
+	if queue == nil {
+		return
+	}
+	queue.Close()
+	if done != nil {
+		timer := time.NewTimer(clusterUsageDrainTimeout)
+		select {
+		case <-done:
+		case <-timer.C:
+			if dropped := queue.Discard(); dropped > 0 {
+				log.WithField("dropped", dropped).Warn("cluster usage drain deadline exceeded; dropping unpersisted usage payloads")
+			}
+		}
+		timer.Stop()
+	}
+	if cancelWrite != nil {
+		cancelWrite()
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -574,8 +575,8 @@ func (c *Collector) failureSchedule(ctx context.Context, credentialID string, fa
 			}
 		}
 	}
-	if failure.retryAfter > delay {
-		delay = failure.retryAfter
+	if retryAfter := min(failure.retryAfter, maxFailureBackoff); retryAfter > delay {
+		delay = retryAfter
 	}
 	delay = quotaBackoffWithJitter(delay, credentialID)
 	return now.Add(delay), failures
@@ -619,7 +620,12 @@ func quotaBackoffWithJitter(delay time.Duration, credentialID string) time.Durat
 	hash := fnv.New32a()
 	_, _ = hash.Write([]byte(strings.TrimSpace(credentialID)))
 	percent := time.Duration(hash.Sum32() % 21)
-	return delay + delay*percent/100
+	// Split the multiplication so large delays cannot overflow into the past.
+	jitter := delay/100*percent + delay%100*percent/100
+	if delay > math.MaxInt64-jitter {
+		return math.MaxInt64
+	}
+	return delay + jitter
 }
 
 func quotaProbeEligible(auth *coreauth.Auth) bool {
@@ -772,11 +778,16 @@ func quotaRetryAfter(headers http.Header, now time.Time) time.Duration {
 	if value == "" {
 		return 0
 	}
+	// Cap hints at the failure backoff ceiling before converting so huge
+	// values cannot overflow and schedule the next probe in the past.
 	if seconds, errSeconds := strconv.ParseInt(value, 10, 64); errSeconds == nil && seconds > 0 {
+		if seconds >= int64(maxFailureBackoff/time.Second) {
+			return maxFailureBackoff
+		}
 		return time.Duration(seconds) * time.Second
 	}
 	if retryAt, errTime := http.ParseTime(value); errTime == nil && retryAt.After(now) {
-		return retryAt.Sub(now)
+		return min(retryAt.Sub(now), maxFailureBackoff)
 	}
 	return 0
 }
