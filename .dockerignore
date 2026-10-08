@@ -1,0 +1,7 @@
+.git
+.tmp
+CLIProxyAPIHome
+home.db*
+config.yaml
+cluster.yaml
+.env
